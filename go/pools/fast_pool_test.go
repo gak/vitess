@@ -100,7 +100,9 @@ func TestFastPutTooFull(t *testing.T) {
 	defer p.Close()
 
 	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
+	p.Lock()
 	p.state.InUse = 1
+	p.Unlock()
 
 	require.Panics(t, func() { p.Put(&TestResource{}) })
 	require.Equal(t, State{Capacity: 1, MinActive: 1, InPool: 1, InUse: 1}, p.State())
@@ -539,7 +541,7 @@ func TestFastClosing(t *testing.T) {
 
 	// Wait for goroutine to call Close
 	time.Sleep(10 * time.Millisecond)
-	require.Equal(t, State{InUse: 5, Closed: true, Draining: true}, p.State())
+	require.Equal(t, State{InUse: 5, Closed: true, Draining: true, IdleTimeout: time.Second}, p.State())
 
 	// Put is allowed when closing
 	for i := 0; i < 5; i++ {
@@ -552,7 +554,7 @@ func TestFastClosing(t *testing.T) {
 	// SetCapacity must be ignored after Close
 	err := p.SetCapacity(1, true)
 	require.Error(t, err)
-	require.Equal(t, State{Closed: true}, p.State())
+	require.Equal(t, State{Closed: true, IdleTimeout: time.Second}, p.State())
 	require.Equal(t, 5, int(lastID.Get()))
 	require.Equal(t, 0, int(count.Get()))
 }

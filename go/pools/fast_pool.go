@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"golang.org/x/net/context"
-	"vitess.io/vitess/go/timer"
 )
 
 var _ Pool = &FastPool{}
@@ -42,9 +41,6 @@ type FastPool struct {
 
 	// pool contains active resources.
 	pool chan resourceWrapper
-
-	// idleTimer is used to terminate idle resources that are in the pool.
-	idleTimer *timer.Timer
 }
 
 type State struct {
@@ -119,6 +115,8 @@ func NewFastPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.D
 
 	p.ensureMinimumActive()
 	p.SetIdleTimeout(idleTimeout)
+
+	go p.closeIdleResources()
 
 	return p
 }
@@ -195,7 +193,6 @@ func (p *FastPool) ensureMinimumActive() {
 // It waits for all resources to be returned (Put).
 // After a Close, Get is not allowed.
 func (p *FastPool) Close() {
-	p.SetIdleTimeout(0)
 	_ = p.SetCapacity(0, true)
 }
 
@@ -363,7 +360,7 @@ func (p *FastPool) SetCapacity(capacity int, block bool) error {
 		return fmt.Errorf("capacity %d is out of range", capacity)
 	}
 
-	if capacity != 0 {
+	if capacity > 0 {
 		minActive := p.state.MinActive
 		if capacity < minActive {
 			p.Unlock()
@@ -387,20 +384,17 @@ func (p *FastPool) SetCapacity(capacity int, block bool) error {
 	p.state.Draining = true
 	p.Unlock()
 
-	var done chan bool
 	if block {
-		done = make(chan bool)
-	}
-	go p.shrink(done)
-	if block {
-		<-done
+		p.shrink()
+	} else {
+		go p.shrink()
 	}
 
 	return nil
 }
 
 // shrink active resources until capacity it is not above the set capacity.
-func (p *FastPool) shrink(done chan<- bool) {
+func (p *FastPool) shrink() {
 	for {
 		p.Lock()
 		remaining := p.active() - p.state.Capacity
@@ -411,7 +405,6 @@ func (p *FastPool) shrink(done chan<- bool) {
 				p.state.Closed = true
 			}
 			p.Unlock()
-			done <- true
 			return
 		}
 		p.Unlock()
@@ -439,75 +432,82 @@ func (p *FastPool) shrink(done chan<- bool) {
 func (p *FastPool) SetIdleTimeout(idleTimeout time.Duration) {
 	p.Lock()
 	p.state.IdleTimeout = idleTimeout
-	fastInterval := p.state.IdleTimeout / 10
-
-	if p.idleTimer == nil {
-		p.idleTimer = timer.NewTimer(fastInterval)
-	} else {
-		p.Unlock()
-		p.idleTimer.Stop()
-		p.Lock()
-	}
-
-	if p.state.IdleTimeout == 0 {
-		p.Unlock()
-		return
-	}
-
-	p.idleTimer.SetInterval(fastInterval)
-	p.idleTimer.Start(p.closeIdleResources)
 	p.Unlock()
 }
 
 // closeIdleResources scans the pool for idle resources
-// and closes them.
+// and closes them. It is meant to run as a goroutine and will
+// return when the pool is closed.
 func (p *FastPool) closeIdleResources() {
-	// Shouldn't be zero, but checking in case.
-	if p.State().IdleTimeout == 0 {
-		return
-	}
+	for !p.IsClosed() {
 
-	for {
+		timeout := p.State().IdleTimeout
+
+		if timeout == 0 {
+			// Wait for an updated idleTimeout.
+			time.Sleep(time.Second)
+			continue
+		}
+
+		time.Sleep(timeout / 10)
+
 		p.Lock()
-		inPool := p.state.InPool
+		remaining := p.state.InPool
 		minActive := p.state.MinActive
-		active := p.active()
 		p.Unlock()
 
-		if active <= minActive {
-			return
-		}
+		for scanning := true; scanning && remaining > 0; remaining-- {
+			p.Lock()
+			active := p.active()
+			closed := p.state.Closed
+			p.Unlock()
 
-		if inPool == 0 {
-			return
-		}
-
-		select {
-		case wrapper, ok := <-p.pool:
-			if !ok {
+			if closed {
 				return
 			}
 
-			p.Lock()
-			deadline := wrapper.timeUsed.Add(p.state.IdleTimeout)
-			if time.Now().After(deadline) {
-				p.state.IdleClosed++
-				p.state.InPool--
-				p.Unlock()
-
-				wrapper.resource.Close()
-				wrapper.resource = nil
+			if active <= minActive {
 				break
 			}
-			p.Unlock()
 
-			// Not expired--back into the pool we go.
-			p.pool <- wrapper
+			select {
+			case wrapper, ok := <-p.pool:
+				if !ok {
+					return
+				}
 
-		default:
-			// The pool might have been used while we were iterating.
-			// Maybe next time!
-			return
+				deadline := wrapper.timeUsed.Add(timeout)
+				if time.Now().After(deadline) {
+					p.Lock()
+					p.state.IdleClosed++
+					p.state.InPool--
+					p.Unlock()
+
+					wrapper.resource.Close()
+					wrapper.resource = nil
+					break
+				}
+
+				// Not expired--back into the pool we go.
+				select {
+				case p.pool <- wrapper:
+				default:
+					// Can't put back into pool. Might be full.
+					p.Lock()
+					p.state.InPool--
+					p.Unlock()
+
+					wrapper.resource.Close()
+					wrapper.resource = nil
+
+					scanning = false
+				}
+
+			default:
+				// The pool might have been used while we were iterating.
+				// Maybe next time!
+				scanning = false
+			}
 		}
 	}
 }
