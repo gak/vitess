@@ -213,6 +213,13 @@ message ApplySchemaResponse {
   SchemaDefinition after_schema = 2;
 }
 
+message SetPoolCapacityRequest {
+  int32 capacity = 1;
+}
+
+message SetPoolCapacityResponse {
+}
+
 message LockTablesRequest {
 }
 

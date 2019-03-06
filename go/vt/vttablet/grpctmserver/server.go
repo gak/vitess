@@ -178,6 +178,16 @@ func (s *server) ApplySchema(ctx context.Context, request *tabletmanagerdatapb.A
 	return response, err
 }
 
+func (s *server) SetPoolCapacity(ctx context.Context, req *tabletmanagerdatapb.SetPoolCapacityRequest) (*tabletmanagerdatapb.SetPoolCapacityResponse, error) {
+	err := s.agent.SetPoolCapacity(ctx, req.Capacity)
+	if err != nil {
+		return nil, vterrors.Wrapf(err, "could not set capacity to %d", req.Capacity)
+	}
+
+	return &tabletmanagerdatapb.SetPoolCapacityResponse{}, nil
+}
+
+
 func (s *server) LockTables(ctx context.Context, req *tabletmanagerdatapb.LockTablesRequest) (*tabletmanagerdatapb.LockTablesResponse, error) {
 	err := s.agent.LockTables(ctx)
 	if err != nil {

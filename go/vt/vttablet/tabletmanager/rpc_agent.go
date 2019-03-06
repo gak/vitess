@@ -66,6 +66,8 @@ type RPCAgent interface {
 
 	ApplySchema(ctx context.Context, change *tmutils.SchemaChange) (*tabletmanagerdatapb.SchemaChangeResult, error)
 
+	SetPoolCapacity(ctx context.Context, capacity int32) error
+
 	LockTables(ctx context.Context) error
 
 	UnlockTables(ctx context.Context) error

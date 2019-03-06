@@ -151,3 +151,17 @@ func (agent *ActionAgent) IgnoreHealthError(ctx context.Context, pattern string)
 	agent.mutex.Unlock()
 	return nil
 }
+
+func (agent *ActionAgent) SetPoolCapacity(ctx context.Context, capacity int32) error {
+	if err := agent.lock(ctx); err != nil {
+		log.Warningf("cannot lock actionMutex, not running SetPoolCapacity")
+		return err
+	}
+	defer agent.unlock()
+
+	if err := agent.QueryServiceControl.QueryService().SetPoolCapacity(ctx, capacity); err != nil {
+		return vterrors.Wrapf(err, "could not set pool capacity %d", capacity)
+	}
+
+	return nil
+}
