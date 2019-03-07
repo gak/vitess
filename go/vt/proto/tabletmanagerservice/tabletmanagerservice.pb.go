@@ -690,6 +690,8 @@ type TabletManagerServer interface {
 	Backup(*tabletmanagerdata.BackupRequest, TabletManager_BackupServer) error
 	// RestoreFromBackup deletes all local data and restores it from the latest backup.
 	RestoreFromBackup(*tabletmanagerdata.RestoreFromBackupRequest, TabletManager_RestoreFromBackupServer) error
+	// SetPoolCapacity updates the size of the query pool
+	SetPoolCapacity(ctx context.Context, req *tabletmanagerdatapb.SetPoolCapacityRequest) (*tabletmanagerdatapb.SetPoolCapacityResponse, error)
 }
 
 func RegisterTabletManagerServer(s *grpc.Server, srv TabletManagerServer) {

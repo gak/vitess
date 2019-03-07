@@ -111,9 +111,6 @@ type QueryService interface {
 
 	// Close must be called for releasing resources.
 	Close(ctx context.Context) error
-
-	// SetPoolCapacity
-	SetPoolCapacity(ctx context.Context, capacity int32) error
 }
 
 type resultStreamer struct {

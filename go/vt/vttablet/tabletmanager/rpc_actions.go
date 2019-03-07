@@ -159,7 +159,7 @@ func (agent *ActionAgent) SetPoolCapacity(ctx context.Context, capacity int32) e
 	}
 	defer agent.unlock()
 
-	if err := agent.QueryServiceControl.QueryService().SetPoolCapacity(ctx, capacity); err != nil {
+	if err := agent.SetPoolCapacity(ctx, capacity); err != nil {
 		return vterrors.Wrapf(err, "could not set pool capacity %d", capacity)
 	}
 

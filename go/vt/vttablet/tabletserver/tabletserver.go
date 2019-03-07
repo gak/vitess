@@ -2175,6 +2175,10 @@ func (tsv *TabletServer) SetConsolidatorEnabled(enabled bool) {
 	tsv.qe.enableConsolidator = enabled
 }
 
+func (tsv *TabletServer) SetCapacity(capacity int32) error {
+	return tsv.qe.conns.SetCapacity(int(capacity))
+}
+
 // queryAsString returns a readable version of query+bind variables.
 func queryAsString(sql string, bindVariables map[string]*querypb.BindVariable) string {
 	buf := &bytes.Buffer{}

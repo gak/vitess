@@ -84,6 +84,8 @@ type Controller interface {
 
 	// TopoServer returns the topo server.
 	TopoServer() *topo.Server
+
+	SetCapacity(int32) error
 }
 
 // Ensure TabletServer satisfies Controller interface.
