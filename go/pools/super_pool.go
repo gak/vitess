@@ -77,22 +77,32 @@ func (p *SuperPool) main(state State) {
 					p.open <- *cmd
 				}
 			case putCommand:
+				if state.InUse <= 0 {
+
+					cmd.callback <- ErrPutBeforeGet
+					break
+				}
+
 				fmt.Println("got put command inuse--")
-				state.InUse--
 				if cmd.resource != nil {
 					fmt.Println("inpool increased")
 					select {
 					case p.pool <- resourceWrapper{resource: cmd.resource}:
 						state.InPool++
+						state.InUse--
+						cmd.callback <- nil
 					default:
 						fmt.Println("pool full???")
 						cmd.callback <- ErrFull
 					}
+				} else {
+					state.InUse--
+					cmd.callback <- nil
 				}
 			case closeCommand:
 				fmt.Println("got close command TODO")
 			default:
-				fmt.Println("unknown command")
+				panic("unknown command")
 			}
 
 		case info := <-p.newResources:
@@ -143,6 +153,10 @@ func (p *SuperPool) Put(r Resource) {
 		callback: ret,
 		resource: r,
 	})
+	err := <-ret
+	if err == ErrFull || err == ErrPutBeforeGet {
+		panic(err)
+	}
 }
 
 func (p *SuperPool) SetCapacity(int, bool) error {
