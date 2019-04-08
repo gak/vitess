@@ -28,30 +28,46 @@ type SuperPool struct {
 
 // Commands
 
-type command interface{}
+type command interface {
+	command()
+}
 
-type getCommand *chan resourceWrapper
+type getCommand struct {
+	callback chan resourceWrapper
+}
+
+func (c getCommand) command() {}
 
 type putCommand struct {
 	callback chan error
 	resource Resource
 }
 
+func (c putCommand) command() {}
+
 type newResourceCommand struct {
 	requester chan resourceWrapper
 	resource  resourceWrapper
 }
+
+func (c newResourceCommand) command() {}
 
 type setCapacityCommand struct {
 	size int
 	wait chan bool
 }
 
+func (c setCapacityCommand) command() {}
+
 type didCloseCommand struct {
 	createType createType
 }
 
+func (c didCloseCommand) command() {}
+
 type finishCommand bool
+
+func (c finishCommand) command() {}
 
 // Internal channel messages
 
@@ -119,9 +135,9 @@ func (p *SuperPool) main(state State) {
 					r, p.pool = p.pool[0], p.pool[1:]
 					state.InPool--
 					state.InUse++
-					*cmd <- r
+					cmd.callback <- r
 				} else {
-					p.open <- *cmd
+					p.open <- cmd.callback
 				}
 
 			case newResourceCommand:
@@ -157,10 +173,8 @@ func (p *SuperPool) main(state State) {
 				if cmd.resource != nil {
 					p.pool = append(p.pool, wrapper)
 					state.InPool++
-					state.InUse--
-				} else {
-					state.InUse--
 				}
+				state.InUse--
 				cmd.callback <- nil
 
 			case setCapacityCommand:
@@ -206,7 +220,7 @@ func (p *SuperPool) main(state State) {
 			case didCloseCommand:
 				state.Closing--
 
-				if state.Draining && state.Capacity >= active() + state.Closing {
+				if state.Draining && state.Capacity >= active()+state.Closing {
 					state.Draining = false
 					if newCapWait != nil {
 						newCapWait <- true
@@ -267,9 +281,9 @@ func (p *SuperPool) Close() {
 }
 
 func (p *SuperPool) Get(context.Context) (Resource, error) {
-	get := make(chan resourceWrapper)
-	p.cmd <- getCommand(&get)
-	w := <-get
+	callback := make(chan resourceWrapper)
+	p.cmd <- getCommand{callback: callback}
+	w := <-callback
 	return w.resource, nil
 }
 
