@@ -73,6 +73,7 @@ func TestSuperDrainBlock(t *testing.T) {
 	done := make(chan bool)
 	go func() {
 		require.NoError(t, p.SetCapacity(1, true))
+		time.Sleep(time.Millisecond)
 		done <- true
 	}()
 

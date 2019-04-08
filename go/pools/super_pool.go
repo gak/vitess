@@ -3,22 +3,25 @@ package pools
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync/atomic"
 	"time"
+	"vitess.io/vitess/go/vt/vterrors"
 )
 
 var _ Pool = &SuperPool{}
 
 type SuperPool struct {
-	factory CreateFactory
-	pool    chan resourceWrapper
-	cmd     chan command
+	factory  CreateFactory
+	pool     []resourceWrapper
+	cmd      chan command
+	finished chan bool
 
 	// Opener
 	open chan chan resourceWrapper
 
 	// Closer
-	close chan bool
+	close chan closeRequest
 
 	state atomic.Value
 }
@@ -40,23 +43,31 @@ type newResourceCommand struct {
 }
 
 type setCapacityCommand struct {
-	size  int
-	block bool
+	size int
+	wait chan bool
 }
 
-type didCloseCommand bool
+type didCloseCommand struct {
+	createType createType
+}
 
-type closeCommand bool
+type finishCommand bool
 
 // Internal channel messages
+
+type closeRequest struct {
+	wrapper    resourceWrapper
+	createType createType
+}
 
 // NewSuperPool
 func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.Duration, minActive int) *SuperPool {
 	p := &SuperPool{
-		factory: factory,
-		pool:    make(chan resourceWrapper, maxCap),
-		cmd:     make(chan command),
-		open:    make(chan chan resourceWrapper),
+		factory:  factory,
+		cmd:      make(chan command),
+		open:     make(chan chan resourceWrapper),
+		close:    make(chan closeRequest),
+		finished: make(chan bool),
 	}
 
 	state := State{
@@ -74,77 +85,138 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 
 func (p *SuperPool) main(state State) {
 	idle := time.NewTimer(time.Second)
-	for {
-		fmt.Println("main: store")
-		p.state.Store(state)
 
-		fmt.Println("main: select")
+	flush := func() {
+		p.state.Store(state)
+	}
+
+	var newCapCallback chan bool
+	var toDrain = 0
+	for {
+		fmt.Println("------------------------------------")
+		fmt.Printf("%+v\n", state)
+		fmt.Println("------------------------------------")
+		flush()
+
 		select {
-		case cmd := <-p.cmd:
-			fmt.Println("got a command!", cmd)
+		case cmd, ok := <-p.cmd:
+			if !ok {
+				return
+			}
+			fmt.Println("CMD:", reflect.TypeOf(cmd))
 			switch cmd := cmd.(type) {
 			case getCommand:
-				select {
-				case r, _ := <-p.pool:
-					fmt.Println("Got an existing resource")
+				if len(p.pool) > 0 {
+					var r resourceWrapper
+					r, p.pool = p.pool[0], p.pool[1:]
 					*cmd <- r
-				default:
-					fmt.Println("No free resources. Asking to open.")
+				} else {
 					p.open <- *cmd
 				}
 
 			case newResourceCommand:
-				fmt.Println("a new resource was created for a caller")
 				state.InUse++
 				cmd.requester <- cmd.resource
 
 			case putCommand:
-				fmt.Println("putCommand")
+				wrapper := resourceWrapper{resource: cmd.resource}
+
 				if state.InUse <= 0 {
-					fmt.Println("err1")
-					cmd.callback <- ErrPutBeforeGet
+					cmd.callback <- vterrors.Wrap(ErrPutBeforeGet, "")
 					break
+				}
+
+				if state.Draining {
+					if toDrain > 0 {
+						toDrain--
+						if cmd.resource != nil {
+							p.close <- closeRequest{
+								createType: forUse,
+								wrapper: wrapper,
+							}
+						}
+						cmd.callback <- nil
+						break
+					}
 				}
 
 				if state.InUse+state.InPool > state.Capacity {
-					fmt.Println("err2")
-					cmd.callback <- ErrFull
+					cmd.callback <- vterrors.Wrap(ErrFull, "")
 					break
 				}
 
-				fmt.Println("got put command inuse--")
 				if cmd.resource != nil {
-					fmt.Println("inpool increased")
-					select {
-					case p.pool <- resourceWrapper{resource: cmd.resource}:
-						state.InPool++
-						state.InUse--
-						cmd.callback <- nil
-					default:
-						fmt.Println("pool full???")
-						cmd.callback <- ErrFull
-					}
+					p.pool = append(p.pool, wrapper)
+					state.InPool++
+					state.InUse--
 				} else {
 					state.InUse--
-					cmd.callback <- nil
 				}
+				cmd.callback <- nil
 
 			case setCapacityCommand:
-				state.Capacity = cmd.size
-				if cmd.size < state.Capacity {
-					state.Draining = true
-					for i := 0; i < state.Capacity-cmd.size; i++ {
-						p.close <- true
-					}
+				fmt.Println("wtf!")
+
+				// TODO(gak): If anyone has been waiting for an existing setCapacity, we tell them it's done
+				//  immediately because it'll get hairy to track multiple setCapacity's for now.
+				if newCapCallback != nil {
+					newCapCallback <- true
+					newCapCallback = nil
 				}
 
-			case closeCommand:
+				oldCap := state.Capacity
+				newCap := cmd.size
+				fmt.Println("setcap!")
+
+				if newCap < oldCap {
+					fmt.Println("draining")
+					newCapCallback = cmd.wait
+					var drain []resourceWrapper
+					state.Draining = true
+					toDrain = oldCap - newCap
+					fmt.Println("draining toDrain", toDrain)
+					if state.InPool < toDrain {
+						fmt.Println("not enough in pool")
+						drain, p.pool = p.pool, []resourceWrapper{}
+						toDrain -= state.InPool
+					} else {
+						fmt.Println("enough in pool")
+						drain, p.pool = p.pool[:toDrain], p.pool[toDrain:]
+					}
+					for _, r := range drain {
+						p.close <- closeRequest{
+							createType: forPool,
+							wrapper: r,
+						}
+					}
+				} else {
+					cmd.wait <- true
+				}
+				state.Capacity = cmd.size
+
+			case finishCommand:
 				fmt.Println("got close command TODO")
 
 			case didCloseCommand:
-				state.InPool--
+				switch cmd.createType {
+				case forPool:
+					state.InPool--
+				case forUse:
+					state.InUse--
+				}
+
+				fmt.Println("edrain", state.Draining)
+				fmt.Println("cap", state.Capacity)
+				fmt.Println("active", state.InPool + state.InUse)
 				if state.Draining && state.Capacity >= state.InPool+state.InUse {
+					fmt.Println("wut")
 					state.Draining = false
+					if newCapCallback != nil {
+						newCapCallback <- true
+						//newCapCallback = nil
+					}
+					//newCapCallback = nil
+					fmt.Println("wut......")
 				}
 
 			default:
@@ -161,14 +233,15 @@ func (p *SuperPool) main(state State) {
 func (p *SuperPool) opener() {
 	for {
 		select {
-		case requester := <-p.open:
+		case requester, ok := <-p.open:
+			if !ok {
+				return
+			}
 			r, _ := p.factory()
-			fmt.Println("Creating resource")
 			p.cmd <- newResourceCommand{
 				requester: requester,
 				resource:  resourceWrapper{resource: r},
 			}
-			fmt.Println("Creating resource returned")
 		}
 	}
 }
@@ -176,52 +249,60 @@ func (p *SuperPool) opener() {
 func (p *SuperPool) closer() {
 	for {
 		select {
-		case <-p.close:
-			select {
-			case wrapper := <-p.pool:
-				fmt.Println("closing...")
-				wrapper.resource.Close()
-				wrapper.resource = nil
-				p.cmd <- didCloseCommand(true)
-			default:
-				fmt.Println("pool is empty already!")
+		case req, ok := <-p.close:
+			if !ok {
+				return
 			}
+			req.wrapper.resource.Close()
+			req.wrapper.resource = nil
+			p.cmd <- didCloseCommand{createType: req.createType}
 		}
 	}
 }
 
 func (p *SuperPool) Close() {
+	//wait := make(chan bool)
+	//p.cmd <- setCapacityCommand{size: 0, wait: wait}
+	//<-wait
+	close(p.open)
+	close(p.close)
+	close(p.cmd)
 	fmt.Println("implement me close")
 }
 
 func (p *SuperPool) Get(context.Context) (Resource, error) {
 	get := make(chan resourceWrapper)
-	fmt.Println("asking to get!")
 	p.cmd <- getCommand(&get)
-	fmt.Println("asking to get -- waiting")
 	w := <-get
-	fmt.Println("asking to get -- got")
 	return w.resource, nil
 }
 
 func (p *SuperPool) Put(r Resource) {
-	fmt.Println("sending putcommand")
 	ret := make(chan error)
 	p.cmd <- putCommand{
 		callback: ret,
 		resource: r,
 	}
 	err := <-ret
-	if err == ErrFull || err == ErrPutBeforeGet {
-		panic(err)
+	if err != nil {
+		fmt.Printf("error: %+v\n", err)
+		root := vterrors.RootCause(err)
+		if root == ErrFull || root == ErrPutBeforeGet {
+			panic(err)
+		}
 	}
 }
 
 func (p *SuperPool) SetCapacity(size int, block bool) error {
-	p.cmd <- setCapacityCommand{
-		size:  size,
-		block: block,
+	var wait chan bool
+	if block {
+		wait = make(chan bool)
 	}
+	p.cmd <- setCapacityCommand{
+		size: size,
+		wait: wait,
+	}
+	<-wait
 	return nil
 }
 

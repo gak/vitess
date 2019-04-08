@@ -86,6 +86,7 @@ func get(t *testing.T, p Pool) Resource {
 	t.Helper()
 	r, err := p.Get(context.Background())
 	require.NoError(t, err)
+	time.Sleep(time.Millisecond)
 	return r
 }
 

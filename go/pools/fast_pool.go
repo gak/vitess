@@ -74,7 +74,7 @@ type State struct {
 	// IdleClosed tracks the number of resources closed due to being idle.
 	IdleClosed int64
 
-	// WaitCount contains the number of times Get() had to block and wait
+	// WaitCount contains the number of times Get() had to wait and wait
 	// for a resource.
 	WaitCount int64
 
