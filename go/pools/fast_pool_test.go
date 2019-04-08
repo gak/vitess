@@ -82,7 +82,7 @@ func (r *PanicCloseResource) Close() {
 	}
 }
 
-func get(t *testing.T, p *FastPool) Resource {
+func get(t *testing.T, p Pool) Resource {
 	t.Helper()
 	r, err := p.Get(context.Background())
 	require.NoError(t, err)

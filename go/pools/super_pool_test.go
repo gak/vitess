@@ -3,6 +3,7 @@ package pools
 import (
 	"github.com/stretchr/testify/require"
 	"testing"
+	"time"
 )
 
 func TestSuperOpen(t *testing.T) {
@@ -22,6 +23,7 @@ func TestSuperGetPut(t *testing.T) {
 	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
 
 	p.Put(r)
+	time.Sleep(time.Millisecond)
 	require.Equal(t, State{Capacity: 1, InPool: 1}, p.State())
 }
 
@@ -31,6 +33,7 @@ func TestSuperPutEmpty(t *testing.T) {
 
 	get(t, p)
 	p.Put(nil)
+	time.Sleep(time.Millisecond)
 
 	require.Equal(t, len(p.pool), 0)
 	require.Equal(t, State{Capacity: 1}, p.State())
@@ -42,23 +45,5 @@ func TestSuperPutWithoutGet(t *testing.T) {
 
 	require.Panics(t, func() { p.Put(&TestResource{}) })
 	require.Equal(t, State{Capacity: 1}, p.State())
-}
-
-func TestSuperPutTooFull(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 1)
-	defer p.Close()
-
-	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
-	p.Lock()
-	p.state.InUse = 1
-	p.Unlock()
-
-	require.Panics(t, func() { p.Put(&TestResource{}) })
-	require.Equal(t, State{Capacity: 1, MinActive: 1, InPool: 1, InUse: 1}, p.State())
-
-	// Allow p.Close() to not stall on a non-existent resource.
-	p.Lock()
-	p.state.InUse = 0
-	p.Unlock()
 }
 
