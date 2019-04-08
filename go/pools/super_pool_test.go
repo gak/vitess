@@ -47,3 +47,45 @@ func TestSuperPutWithoutGet(t *testing.T) {
 	require.Equal(t, State{Capacity: 1}, p.State())
 }
 
+func TestSuperPutTooFull(t *testing.T) {
+	p := NewSuperPool(PoolFactory, 1, 1, 0, 1)
+	defer p.Close()
+
+	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
+	state := p.State()
+	state.InUse = 1
+	p.state.Store(state)
+
+	require.Panics(t, func() { p.Put(&TestResource{}) })
+}
+
+func TestSuperDrainBlock(t *testing.T) {
+	p := NewSuperPool(SlowCloseFactory, 3, 3, 0, 0)
+	defer p.Close()
+
+	var resources []Resource
+	for i := 0; i < 3; i++ {
+		resources = append(resources, get(t, p))
+	}
+	p.Put(resources[0])
+	require.Equal(t, State{Capacity: 3, InUse: 2, InPool: 1}, p.State())
+
+	done := make(chan bool)
+	go func() {
+		require.NoError(t, p.SetCapacity(1, true))
+		done <- true
+	}()
+
+	time.Sleep(time.Millisecond * 30)
+	// The first resource should be closed by now, but waiting for the second to unblock.
+	require.Equal(t, State{Capacity: 1, Draining: true, InUse: 2}, p.State())
+
+	p.Put(resources[1])
+
+	<-done
+	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+
+	// Clean up so p.Close() can run properly.
+	p.Put(resources[2])
+}
+

@@ -10,37 +10,53 @@ import (
 var _ Pool = &SuperPool{}
 
 type SuperPool struct {
-	factory      CreateFactory
-	pool         chan resourceWrapper
-	cmd          chan command
-	open         chan chan resourceWrapper
-	newResources chan newResource
+	factory CreateFactory
+	pool    chan resourceWrapper
+	cmd     chan command
+
+	// Opener
+	open chan chan resourceWrapper
+
+	// Closer
+	close chan bool
 
 	state atomic.Value
 }
 
-type newResource struct {
-	requester chan resourceWrapper
-	resource  resourceWrapper
-}
+// Commands
 
-type returnedResource struct {
+type command interface{}
+
+type getCommand *chan resourceWrapper
+
+type putCommand struct {
 	callback chan error
 	resource Resource
 }
 
-type command interface{}
-type getCommand *chan resourceWrapper
-type putCommand returnedResource
+type newResourceCommand struct {
+	requester chan resourceWrapper
+	resource  resourceWrapper
+}
+
+type setCapacityCommand struct {
+	size  int
+	block bool
+}
+
+type didCloseCommand bool
+
 type closeCommand bool
 
+// Internal channel messages
+
+// NewSuperPool
 func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.Duration, minActive int) *SuperPool {
 	p := &SuperPool{
-		factory:      factory,
-		pool:         make(chan resourceWrapper, maxCap),
-		cmd:          make(chan command),
-		open:         make(chan chan resourceWrapper),
-		newResources: make(chan newResource),
+		factory: factory,
+		pool:    make(chan resourceWrapper, maxCap),
+		cmd:     make(chan command),
+		open:    make(chan chan resourceWrapper),
 	}
 
 	state := State{
@@ -51,7 +67,7 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 
 	go p.main(state)
 	go p.opener()
-	//go p.closer()
+	go p.closer()
 
 	return p
 }
@@ -76,10 +92,23 @@ func (p *SuperPool) main(state State) {
 					fmt.Println("No free resources. Asking to open.")
 					p.open <- *cmd
 				}
-			case putCommand:
-				if state.InUse <= 0 {
 
+			case newResourceCommand:
+				fmt.Println("a new resource was created for a caller")
+				state.InUse++
+				cmd.requester <- cmd.resource
+
+			case putCommand:
+				fmt.Println("putCommand")
+				if state.InUse <= 0 {
+					fmt.Println("err1")
 					cmd.callback <- ErrPutBeforeGet
+					break
+				}
+
+				if state.InUse+state.InPool > state.Capacity {
+					fmt.Println("err2")
+					cmd.callback <- ErrFull
 					break
 				}
 
@@ -99,16 +128,28 @@ func (p *SuperPool) main(state State) {
 					state.InUse--
 					cmd.callback <- nil
 				}
+
+			case setCapacityCommand:
+				state.Capacity = cmd.size
+				if cmd.size < state.Capacity {
+					state.Draining = true
+					for i := 0; i < state.Capacity-cmd.size; i++ {
+						p.close <- true
+					}
+				}
+
 			case closeCommand:
 				fmt.Println("got close command TODO")
+
+			case didCloseCommand:
+				state.InPool--
+				if state.Draining && state.Capacity >= state.InPool+state.InUse {
+					state.Draining = false
+				}
+
 			default:
 				panic("unknown command")
 			}
-
-		case info := <-p.newResources:
-			fmt.Println("a new resource was created for a caller")
-			state.InUse++
-			info.requester <- info.resource
 
 		case <-idle.C:
 			fmt.Println("timer...")
@@ -123,11 +164,28 @@ func (p *SuperPool) opener() {
 		case requester := <-p.open:
 			r, _ := p.factory()
 			fmt.Println("Creating resource")
-			p.newResources <- newResource{
+			p.cmd <- newResourceCommand{
 				requester: requester,
 				resource:  resourceWrapper{resource: r},
 			}
 			fmt.Println("Creating resource returned")
+		}
+	}
+}
+
+func (p *SuperPool) closer() {
+	for {
+		select {
+		case <-p.close:
+			select {
+			case wrapper := <-p.pool:
+				fmt.Println("closing...")
+				wrapper.resource.Close()
+				wrapper.resource = nil
+				p.cmd <- didCloseCommand(true)
+			default:
+				fmt.Println("pool is empty already!")
+			}
 		}
 	}
 }
@@ -149,18 +207,22 @@ func (p *SuperPool) Get(context.Context) (Resource, error) {
 func (p *SuperPool) Put(r Resource) {
 	fmt.Println("sending putcommand")
 	ret := make(chan error)
-	p.cmd <- putCommand(returnedResource{
+	p.cmd <- putCommand{
 		callback: ret,
 		resource: r,
-	})
+	}
 	err := <-ret
 	if err == ErrFull || err == ErrPutBeforeGet {
 		panic(err)
 	}
 }
 
-func (p *SuperPool) SetCapacity(int, bool) error {
-	panic("implement me")
+func (p *SuperPool) SetCapacity(size int, block bool) error {
+	p.cmd <- setCapacityCommand{
+		size:  size,
+		block: block,
+	}
+	return nil
 }
 
 func (p *SuperPool) SetIdleTimeout(duration time.Duration) {
