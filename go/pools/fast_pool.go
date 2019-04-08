@@ -53,6 +53,9 @@ type State struct {
 	// InUse is the number of resources allocated outside of the pool.
 	InUse int
 
+	// Closing is the number of resources currently being closed.
+	Closing int
+
 	// Spawning is the number of resources currently being created.
 	Spawning int
 
