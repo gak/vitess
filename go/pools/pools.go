@@ -60,6 +60,7 @@ type Resource interface {
 type resourceWrapper struct {
 	resource Resource
 	timeUsed time.Time
+	err error
 }
 
 type Impl int

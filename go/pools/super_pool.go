@@ -18,10 +18,13 @@ type SuperPool struct {
 	finished chan bool
 
 	// Opener
-	open chan chan resourceWrapper
+	open chan openRequest
 
 	// Closer
 	close chan closeRequest
+
+	// The number of routines that need to exit when closing.
+	routines int
 
 	state atomic.Value
 }
@@ -45,12 +48,13 @@ type putCommand struct {
 
 func (c putCommand) command() {}
 
-type newResourceCommand struct {
-	requester chan resourceWrapper
+type didOpenCommand struct {
+	callback  chan resourceWrapper
 	resource  resourceWrapper
+	createFor createType
 }
 
-func (c newResourceCommand) command() {}
+func (c didOpenCommand) command() {}
 
 type setCapacityCommand struct {
 	size int
@@ -59,21 +63,23 @@ type setCapacityCommand struct {
 
 func (c setCapacityCommand) command() {}
 
-type didCloseCommand struct {
-	createType createType
-}
+type didCloseCommand struct{}
 
 func (c didCloseCommand) command() {}
 
-type finishCommand bool
+type finishCommand struct{}
 
 func (c finishCommand) command() {}
 
 // Internal channel messages
 
+type openRequest struct {
+	callback chan resourceWrapper
+	reason   createType
+}
+
 type closeRequest struct {
-	wrapper    resourceWrapper
-	createType createType
+	wrapper resourceWrapper
 }
 
 // NewSuperPool
@@ -81,7 +87,7 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 	p := &SuperPool{
 		factory:  factory,
 		cmd:      make(chan command),
-		open:     make(chan chan resourceWrapper, 10),
+		open:     make(chan openRequest, 10),
 		close:    make(chan closeRequest, 10),
 		finished: make(chan bool),
 	}
@@ -91,6 +97,8 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 		MinActive: minActive,
 	}
 	p.state.Store(state)
+
+	p.routines = 3
 
 	go p.main(state)
 	go p.opener()
@@ -105,7 +113,6 @@ func (p *SuperPool) main(state State) {
 	flush := func() {
 		p.state.Store(state)
 	}
-
 	active := func() int {
 		return state.InPool + state.InUse
 	}
@@ -122,7 +129,19 @@ func (p *SuperPool) main(state State) {
 			panic("something not right")
 		}
 
+		if !state.Draining {
+			for i := 0; i < p.MinActive()-active()-state.Spawning; i++ {
+				state.Spawning++
+				p.open <- openRequest{
+					reason: forPool,
+				}
+			}
+		}
+
 		select {
+		case <-p.finished:
+			return
+
 		case cmd, ok := <-p.cmd:
 			if !ok {
 				return
@@ -130,19 +149,38 @@ func (p *SuperPool) main(state State) {
 			fmt.Println("CMD:", reflect.TypeOf(cmd))
 			switch cmd := cmd.(type) {
 			case getCommand:
-				if len(p.pool) > 0 {
+				if 1+active()+state.Spawning > state.Capacity {
+					cmd.callback <- resourceWrapper{
+						err: ErrFull,
+					}
+				} else if len(p.pool) > 0 {
 					var r resourceWrapper
 					r, p.pool = p.pool[0], p.pool[1:]
 					state.InPool--
 					state.InUse++
 					cmd.callback <- r
 				} else {
-					p.open <- cmd.callback
+					state.Spawning++
+					state.Waiters++
+					p.open <- openRequest{
+						callback: cmd.callback,
+						reason:   forUse,
+					}
 				}
 
-			case newResourceCommand:
-				state.InUse++
-				cmd.requester <- cmd.resource
+			case didOpenCommand:
+				state.Spawning--
+				switch cmd.createFor {
+				case forPool:
+					state.InPool++
+					p.pool = append(p.pool, cmd.resource)
+				case forUse:
+					state.InUse++
+					state.Waiters--
+				}
+				if cmd.callback != nil {
+					cmd.callback <- cmd.resource
+				}
 
 			case putCommand:
 				wrapper := resourceWrapper{resource: cmd.resource}
@@ -162,8 +200,7 @@ func (p *SuperPool) main(state State) {
 					if cmd.resource != nil {
 						state.Closing++
 						p.close <- closeRequest{
-							createType: forUse,
-							wrapper:    wrapper,
+							wrapper: wrapper,
 						}
 					}
 					cmd.callback <- nil
@@ -204,8 +241,7 @@ func (p *SuperPool) main(state State) {
 					state.Closing += len(drain)
 					for _, r := range drain {
 						p.close <- closeRequest{
-							createType: forPool,
-							wrapper:    r,
+							wrapper: r,
 						}
 					}
 				} else {
@@ -221,6 +257,7 @@ func (p *SuperPool) main(state State) {
 				state.Closing--
 
 				if state.Draining && state.Capacity >= active()+state.Closing {
+					fmt.Println("Draining finished!")
 					state.Draining = false
 					if newCapWait != nil {
 						newCapWait <- true
@@ -242,14 +279,18 @@ func (p *SuperPool) main(state State) {
 func (p *SuperPool) opener() {
 	for {
 		select {
+		case <-p.finished:
+			return
+
 		case requester, ok := <-p.open:
 			if !ok {
 				return
 			}
 			r, _ := p.factory()
-			p.cmd <- newResourceCommand{
-				requester: requester,
+			p.cmd <- didOpenCommand{
+				callback:  requester.callback,
 				resource:  resourceWrapper{resource: r},
+				createFor: requester.reason,
 			}
 		}
 	}
@@ -258,25 +299,35 @@ func (p *SuperPool) opener() {
 func (p *SuperPool) closer() {
 	for {
 		select {
+		case <-p.finished:
+			return
+
 		case req, ok := <-p.close:
 			if !ok {
 				return
 			}
 			req.wrapper.resource.Close()
 			req.wrapper.resource = nil
-			p.cmd <- didCloseCommand{createType: req.createType}
+			p.cmd <- didCloseCommand{}
 		}
 	}
 }
 
 func (p *SuperPool) Close() {
+	fmt.Println("Closing!")
+
 	wait := make(chan bool)
 	p.cmd <- setCapacityCommand{size: 0, wait: wait}
 	<-wait
 
+	for i := 0; i < p.routines; i++ {
+		p.finished <- true
+	}
+
+	close(p.cmd)
 	close(p.open)
 	close(p.close)
-	close(p.cmd)
+
 	fmt.Println("implement me close")
 }
 
@@ -284,6 +335,9 @@ func (p *SuperPool) Get(context.Context) (Resource, error) {
 	callback := make(chan resourceWrapper)
 	p.cmd <- getCommand{callback: callback}
 	w := <-callback
+	if w.err != nil {
+		return nil, w.err
+	}
 	return w.resource, nil
 }
 
@@ -335,7 +389,7 @@ func (p *SuperPool) MaxCap() int {
 }
 
 func (p *SuperPool) MinActive() int {
-	panic("implement me")
+	return p.State().MinActive
 }
 
 func (p *SuperPool) Active() int {
@@ -343,7 +397,13 @@ func (p *SuperPool) Active() int {
 }
 
 func (p *SuperPool) Available() int {
-	panic("implement me")
+	s := p.State()
+	available := s.Capacity - s.InUse
+	// Sometimes we can be over capacity temporarily while the capacity shrinks.
+	if available < 0 {
+		return 0
+	}
+	return available
 }
 
 func (SuperPool) InUse() int {

@@ -177,7 +177,7 @@ func (rp *ResourcePool) get(ctx context.Context, wait bool) (resource Resource, 
 func (rp *ResourcePool) Put(resource Resource) {
 	var wrapper resourceWrapper
 	if resource != nil {
-		wrapper = resourceWrapper{resource, time.Now()}
+		wrapper = resourceWrapper{resource: resource, timeUsed: time.Now()}
 	} else {
 		rp.active.Add(-1)
 	}
