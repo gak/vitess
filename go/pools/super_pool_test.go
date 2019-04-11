@@ -665,8 +665,6 @@ func TestSuperTimeoutSlow(t *testing.T) {
 	require.EqualError(t, err, "resource pool timed out")
 	cancel()
 
-	time.Sleep(time.Second)
-
 	expected := State{Capacity: 4, InUse: 4, IdleTimeout: time.Second}
 	require.Equal(t, expected, p.State())
 
@@ -785,16 +783,8 @@ func TestSuperMinActiveWithExpiry(t *testing.T) {
 	require.Equal(t, expected, p.State())
 	require.Equal(t, 3, p.Active())
 
-	// Put another resource back, and nothing should expire.
-	p.Put(resources[1])
-	time.Sleep(timeout * 2)
-
-	expected.InPool = 1
-	expected.InUse = 2
-	require.Equal(t, expected, p.State())
-	require.Equal(t, 3, p.Active())
-
 	// Clean up
+	p.Put(resources[1])
 	p.Put(resources[2])
 	p.Put(resources[3])
 	p.Close()
@@ -831,23 +821,8 @@ func TestSuperMinActiveTooHigh(t *testing.T) {
 	NewSuperPool(FailFactory, 1, 1, time.Second, 2)
 }
 
-func TestSuperMinActiveOverCapacity(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, time.Second, 1)
-
-	// We hack this value to try to make ensureMinActive to go higher than
-	// the pool's capacity.
-	replaceState(p, func(state *State) {
-		state.MinActive = 2
-	})
-
-	finish := time.Now().Add(time.Second)
-	for finish.After(time.Now()) {
-		time.Sleep(time.Millisecond * 10)
-		state := p.State()
-		require.True(t, state.Capacity >= state.InPool+state.InUse+state.Spawning)
-	}
-
-	p.Close()
+func TestSuperTooManyGetsAtOnce(t *testing.T) {
+	panic("TODO")
 }
 
 func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {

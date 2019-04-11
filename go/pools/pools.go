@@ -40,6 +40,8 @@ var (
 	// ErrFull is returned if a put is placed when the pool at capacity.
 	ErrFull = errors.New("resource pool is full")
 
+	ErrOpenBufferFull = errors.New("too many concurrent open connections")
+
 	// ErrPutBeforeGet is caused when there was a put called before a get.
 	ErrPutBeforeGet = errors.New("a put was placed before get in the resource pool")
 
