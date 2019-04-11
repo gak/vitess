@@ -57,12 +57,35 @@ func TestSuperPutWithoutGet(t *testing.T) {
 	p.Close()
 }
 
+func TestSuperGetWait(t *testing.T) {
+	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+
+	a := get(t, p)
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+
+	go func() {
+		time.Sleep(time.Millisecond * 10)
+		require.Equal(t, State{Capacity: 1, InUse: 1, Waiters: 1}, p.State())
+		p.Put(a)
+	}()
+
+	b := get(t, p)
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+
+	p.Put(b)
+	require.Equal(t, State{Capacity: 1, InPool: 1}, p.State())
+	p.Close()
+}
+
 func TestSuperPutTooFull(t *testing.T) {
 	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
 
 	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
 	replaceState(p, func(s *State) {
 		s.InUse = 2
+		s.ignoreCapacityAsserts = true
 	})
 
 	require.Panics(t, func() { p.Put(&TestResource{}) })
@@ -85,6 +108,8 @@ func TestSuperDrainBlock(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	require.Equal(t, State{Capacity: 3, InUse: 2, InPool: 1}, p.State())
 
+	fmt.Println("1")
+
 	done := make(chan bool)
 	go func() {
 		require.NoError(t, p.SetCapacity(1, true))
@@ -92,10 +117,13 @@ func TestSuperDrainBlock(t *testing.T) {
 		done <- true
 	}()
 
+	fmt.Println("2")
+
 	time.Sleep(time.Millisecond * 30)
 	// The first resource should be closed by now, but waiting for the second to unblock.
 	require.Equal(t, State{Capacity: 1, Draining: true, InUse: 2}, p.State())
 
+	fmt.Println("3")
 	p.Put(resources[1])
 
 	<-done
@@ -692,8 +720,8 @@ func TestSuperTimeoutPoolFull(t *testing.T) {
 	expected := State{Capacity: 1, InUse: 1, IdleTimeout: time.Second}
 	require.Equal(t, expected, p.State())
 
-	newctx, cancel := context.WithTimeout(ctx, time.Millisecond*50)
-	a, err := p.Get(newctx)
+	shortCtx, cancel := context.WithTimeout(ctx, time.Millisecond*50)
+	a, err := p.Get(shortCtx)
 	cancel()
 	require.EqualError(t, err, "resource pool timed out")
 

@@ -100,20 +100,24 @@ func (p *SuperPool) main(state State) {
 	p.updateIdleTimer(&state)
 
 	for {
-		fmt.Println("------------------------------------")
-		fmt.Printf("%+v\n", state)
-		fmt.Println("------------------------------------")
+		fmt.Printf("\n--- %+v\n\n", state)
 		p.state.Store(state)
 
-		if len(p.pool) != state.InPool {
-			fmt.Println("something is not right", len(p.pool), state.InPool)
-			panic("something not right")
+		// Sanity checks
+		if !state.ignoreCapacityAsserts {
+			if len(p.pool) != state.InPool {
+				fmt.Println("XXXXXX actual pool size doesn't match InPool counter", len(p.pool), state.InPool)
+				panic("")
+			}
+			if len(p.pool)+state.InUse > state.Capacity {
+				fmt.Printf("XXXXXX we are over capacity: %+v\n", state)
+				panic("")
+			}
 		}
 
 		if !state.Draining {
 			for i := 0; i < p.MinActive()-state.InPool-state.InUse-state.Spawning; i++ {
 				state.Spawning++
-				fmt.Println("min active create")
 				p.open <- openRequest{
 					reason: forPool,
 				}
@@ -129,7 +133,7 @@ func (p *SuperPool) main(state State) {
 				return
 			}
 
-			fmt.Println("CMD:", reflect.TypeOf(cmd))
+			fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
 			cmd.execute(p, &state)
 
 		case <-p.idleTimer.C:
@@ -168,28 +172,22 @@ func (cmd getCommand) execute(p *SuperPool, state *State) {
 		state.InUse++
 		fmt.Println("Already in pool, serving...")
 		cmd.callback <- r
-	} else if state.InPool >= state.Capacity {
+		return
+	}
+
+	state.Spawning++
+	state.Waiters++
+	select {
+	case p.open <- openRequest{
+		reason:   forUse,
+		callback: cmd.callback,
+		ctx:      cmd.ctx,
+	}:
+	default:
+		state.Spawning--
+		state.Waiters--
 		cmd.callback <- resourceWrapper{
-			err: vterrors.Wrap(ErrFull, ""),
-		}
-	} else {
-		fmt.Println("Spawning...")
-		state.Spawning++
-		state.Waiters++
-		select {
-		case p.open <- openRequest{
-			reason:   forUse,
-			callback: cmd.callback,
-			ctx:      cmd.ctx,
-		}:
-			fmt.Println("Spawning... sent!")
-		default:
-			state.Spawning--
-			state.Waiters--
-			fmt.Println("Spawning... default!")
-			cmd.callback <- resourceWrapper{
-				err: vterrors.Wrap(ErrOpenBufferFull, ""),
-			}
+			err: vterrors.Wrap(ErrOpenBufferFull, ""),
 		}
 	}
 }
@@ -371,7 +369,6 @@ func (p *SuperPool) opener() {
 			return
 
 		case requester, ok := <-p.open:
-			fmt.Println("opener called")
 			if !ok {
 				return
 			}
@@ -468,6 +465,10 @@ func (p *SuperPool) Close() {
 }
 
 func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
+	if p.State().Closed {
+		return nil, vterrors.Wrap(ErrClosed, "")
+	}
+
 	callback := make(chan resourceWrapper, 1)
 	p.cmd <- getCommand{
 		callback: callback,
