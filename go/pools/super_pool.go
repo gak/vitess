@@ -172,9 +172,9 @@ func (p *SuperPool) main(state State) {
 
 	var newCapWait chan error
 	for {
-		//fmt.Println("------------------------------------")
-		//fmt.Printf("%+v\n", state)
-		//fmt.Println("------------------------------------")
+		fmt.Println("------------------------------------")
+		fmt.Printf("%+v\n", state)
+		fmt.Println("------------------------------------")
 		flush()
 
 		if len(p.pool) != state.InPool {
@@ -199,7 +199,7 @@ func (p *SuperPool) main(state State) {
 			if !ok {
 				return
 			}
-			//fmt.Println("CMD:", reflect.TypeOf(cmd))
+			fmt.Println("CMD:", reflect.TypeOf(cmd))
 			switch cmd := cmd.(type) {
 
 			case testingOnlyReplaceState:
@@ -394,21 +394,57 @@ func (p *SuperPool) opener() {
 			if !ok {
 				return
 			}
-			r, err := p.factory()
+
+			var r Resource
+			var err error
+			aborted := false;
+			done := make(chan bool)
 			doc := didOpenCommand{
 				request: requester,
 			}
-			if err != nil {
-				doc.resource = resourceWrapper{
-					err: err,
-				}
-			} else {
-				doc.resource = resourceWrapper{
-					resource: r,
-					timeUsed: time.Now(),
-				}
+			go func() {
+				r, err = p.factory()
+				done <- true
+			}()
+
+			maybeCtx := requester.ctx
+			var cancelChan <-chan struct{}
+			if maybeCtx != nil {
+				cancelChan = maybeCtx.Done()
 			}
-			p.cmd <- doc
+
+		WaitForResource:
+			select {
+			case <-done:
+				if aborted {
+					break
+				}
+
+				if err != nil {
+					doc.resource = resourceWrapper{
+						err: err,
+					}
+				} else {
+					doc.resource = resourceWrapper{
+						resource: r,
+						timeUsed: time.Now(),
+					}
+				}
+				p.cmd <- doc
+
+			case <-cancelChan:
+				if aborted {
+					// Caller has cancelled again...
+					goto WaitForResource
+				}
+				aborted = true
+				doc.resource = resourceWrapper{
+					err: ErrTimeout,
+				}
+				p.cmd <- doc
+
+				goto WaitForResource
+			}
 		}
 	}
 }
@@ -451,9 +487,10 @@ func (p *SuperPool) Close() {
 }
 
 func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
-	callback := make(chan resourceWrapper)
+	callback := make(chan resourceWrapper, 1)
 	p.cmd <- getCommand{
 		callback: callback,
+		ctx:      ctx,
 	}
 	select {
 	case w := <-callback:
@@ -468,7 +505,7 @@ func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 }
 
 func (p *SuperPool) Put(r Resource) {
-	ret := make(chan error)
+	ret := make(chan error, 1)
 	p.cmd <- putCommand{
 		callback: ret,
 		resource: r,
@@ -490,7 +527,7 @@ func (p *SuperPool) SetCapacity(size int, block bool) error {
 
 	var wait chan error
 	if block {
-		wait = make(chan error)
+		wait = make(chan error, 1)
 	}
 	p.cmd <- setCapacityCommand{
 		size: size,

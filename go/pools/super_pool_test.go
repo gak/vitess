@@ -660,10 +660,19 @@ func TestSuperTimeoutSlow(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		resources = append(resources, get(t, p))
 	}
+
+	fmt.Println("------------")
+	fmt.Println("------------")
+	fmt.Println("------------")
+	fmt.Println("------------")
+	fmt.Println("------------")
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(time.Millisecond*5))
 	r, err := p.Get(ctx)
 	require.EqualError(t, err, "resource pool timed out")
 	cancel()
+
+	time.Sleep(time.Millisecond)
 
 	expected := State{Capacity: 4, InUse: 4, IdleTimeout: time.Second}
 	require.Equal(t, expected, p.State())
@@ -696,7 +705,7 @@ func TestSuperTimeoutPoolFull(t *testing.T) {
 	expected.InPool = 1
 	require.Equal(t, expected, p.State())
 
-		p.Put(a)
+	p.Put(a)
 
 	p.Close()
 }
