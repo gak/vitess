@@ -87,7 +87,14 @@ func New(poolImpl Impl, f CreateFactory, cap, maxCap int, idleTimeout time.Durat
 	case FastImpl:
 		return NewFastPool(f, cap, maxCap, idleTimeout, minActive)
 	case SuperImpl:
-		return NewSuperPool(f, cap, maxCap, idleTimeout, minActive)
+		return NewSuperPool(Opts{
+			Factory:      f,
+			Capacity:     cap,
+			IdleTimeout:  idleTimeout,
+			MinActive:    minActive,
+			OpenWorkers:  10,
+			CloseWorkers: 10,
+		})
 	}
 
 	return nil

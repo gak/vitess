@@ -11,17 +11,27 @@ import (
 
 var _ Pool = &SuperPool{}
 
+type Opts struct {
+	Factory      CreateFactory
+	Capacity     int
+	MinActive    int
+	OpenWorkers  int
+	CloseWorkers int
+	IdleTimeout  time.Duration
+}
+
 type SuperPool struct {
 	factory CreateFactory
+	started bool
 	pool    []resourceWrapper
 	queue   []getCmd
 	cmd     chan command
 
-	// worker goroutines to close
-	finished chan bool
+	// finishMain used to close the main goroutine.
+	finishMain chan bool
 
-	// final finisher for the main goroutine
-	final chan bool
+	// finishWorkers is used to close all workers.
+	finishWorkers chan bool
 
 	// Opener
 	open chan openReq
@@ -41,43 +51,47 @@ type SuperPool struct {
 }
 
 // NewSuperPool
-func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.Duration, minActive int) *SuperPool {
-	if capacity <= 0 || maxCap <= 0 || capacity > maxCap {
+func NewSuperPool(opts Opts) *SuperPool {
+	if opts.Factory == nil {
+		panic("specify a factory")
+	}
+	if opts.Capacity <= 0 {
 		panic("invalid/out of range capacity")
 	}
-	if minActive > capacity {
-		panic(fmt.Errorf("minActive %v higher than capacity %v", minActive, capacity))
+	if opts.MinActive > opts.Capacity {
+		panic(fmt.Errorf("minActive %v higher than capacity %v", opts.MinActive, opts.Capacity))
+	}
+	if opts.OpenWorkers == 0 {
+		panic("open workers required to be set")
+	}
+	if opts.CloseWorkers == 0 {
+		panic("close workers required to be set")
 	}
 
-	// TODO(gak): Make this an option.
-	numOpeners := 100
-	numClosers := 100
-
 	p := &SuperPool{
-		factory:  factory,
-		cmd:      make(chan command, 1),
-		open:     make(chan openReq, capacity),
-		close:    make(chan closeReq, capacity),
-		finished: make(chan bool),
-		final:    make(chan bool),
+		factory:       opts.Factory,
+		cmd:           make(chan command, 1),
+		open:          make(chan openReq, opts.Capacity),
+		close:         make(chan closeReq, opts.Capacity),
+		finishWorkers: make(chan bool),
+		finishMain:    make(chan bool),
 	}
 
 	state := State{
-		Capacity:    capacity,
-		MinActive:   minActive,
-		IdleTimeout: idleTimeout,
+		Capacity:    opts.Capacity,
+		MinActive:   opts.MinActive,
+		IdleTimeout: opts.IdleTimeout,
 	}
 	p.state.Store(state)
 
-	p.workers = numOpeners + numClosers
+	p.workers = opts.OpenWorkers + opts.CloseWorkers
 
 	go p.main(state)
 
-	for i := 0; i < numOpeners; i++ {
+	for i := 0; i < opts.OpenWorkers; i++ {
 		go p.opener()
 	}
-
-	for i := 0; i < numClosers; i++ {
+	for i := 0; i < opts.CloseWorkers; i++ {
 		go p.closer()
 	}
 
@@ -145,14 +159,10 @@ func (p *SuperPool) main(state State) {
 		p.state.Store(state)
 
 		select {
-		case <-p.final:
+		case <-p.finishMain:
 			return
 
-		case cmd, ok := <-p.cmd:
-			if !ok {
-				return
-			}
-
+		case cmd := <-p.cmd:
 			//fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
 			cmd.execute(p, &state)
 
@@ -208,11 +218,7 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 
 	if state.activeTransient() >= state.Capacity {
 		state.Waiters++
-		if !cmd.when.IsZero() {
-			panic("wtf")
-		}
 		cmd.when = time.Now()
-		//fmt.Println("LongWaiting.....")
 		p.queue = append(p.queue, cmd)
 		return
 	}
@@ -256,9 +262,6 @@ func (cmd putCmd) execute(p *SuperPool, state *State) {
 		}
 
 		state.InUse--
-		if state.InUse < 0 {
-			panic("aaaaaaa")
-		}
 		if cmd.resource != nil {
 			state.Closing++
 			p.close <- closeReq{
@@ -274,9 +277,6 @@ func (cmd putCmd) execute(p *SuperPool, state *State) {
 		state.InPool++
 	}
 	state.InUse--
-	if state.InUse < 0 {
-		panic("bbbbbb")
-	}
 	cmd.callback <- nil
 }
 
@@ -428,14 +428,10 @@ func (cmd testingOnlyReplaceState) execute(p *SuperPool, state *State) {
 func (p *SuperPool) opener() {
 	for {
 		select {
-		case <-p.finished:
+		case <-p.finishWorkers:
 			return
 
-		case requester, ok := <-p.open:
-			if !ok {
-				return
-			}
-
+		case requester := <-p.open:
 			aborted := false;
 			done := make(chan bool)
 			doc := didOpenCmd{
@@ -490,15 +486,11 @@ func (p *SuperPool) opener() {
 func (p *SuperPool) closer() {
 	for {
 		select {
-		case <-p.finished:
+		case <-p.finishWorkers:
 			return
 
-		case req, ok := <-p.close:
-			if !ok {
-				return
-			}
+		case req := <-p.close:
 			req.wrapper.resource.Close()
-			req.wrapper.resource = nil
 			p.cmd <- didClose{}
 		}
 	}
@@ -512,9 +504,9 @@ func (p *SuperPool) Close() {
 	}
 
 	for i := 0; i < p.workers; i++ {
-		p.finished <- true
+		p.finishWorkers <- true
 	}
-	p.final <- true
+	p.finishMain <- true
 
 	close(p.open)
 	close(p.close)
@@ -531,16 +523,11 @@ func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 		callback: callback,
 		ctx:      ctx,
 	}
-	select {
-	case w := <-callback:
-		if w.err != nil {
-			return nil, w.err
-		}
-		return w.resource, nil
-		//
-		//case <-ctx.Done():
-		//	return nil, ErrTimeout
+	w := <-callback
+	if w.err != nil {
+		return nil, w.err
 	}
+	return w.resource, nil
 }
 
 func (p *SuperPool) Put(r Resource) {
@@ -586,11 +573,12 @@ func (p *SuperPool) Capacity() int {
 }
 
 func (p *SuperPool) IdleTimeout() time.Duration {
-	panic("implement me")
+	return p.State().IdleTimeout
 }
 
+// MaxCap is not used in this pool implementation, so just give the current capacity.
 func (p *SuperPool) MaxCap() int {
-	panic("implement me")
+	return p.State().Capacity
 }
 
 func (p *SuperPool) MinActive() int {

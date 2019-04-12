@@ -18,14 +18,14 @@ func replaceState(p *SuperPool, f func(state *State)) {
 }
 
 func TestSuperOpen(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 2, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 	require.Equal(t, State{Capacity: 1}, p.State())
 	p.Close()
 }
 
 func TestSuperGetPut(t *testing.T) {
 	lastID.Set(0)
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	r := get(t, p).(*TestResource)
 	require.Equal(t, r.num, int64(1))
@@ -38,7 +38,7 @@ func TestSuperGetPut(t *testing.T) {
 }
 
 func TestSuperPutEmpty(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	get(t, p)
 	p.Put(nil)
@@ -50,7 +50,7 @@ func TestSuperPutEmpty(t *testing.T) {
 }
 
 func TestSuperPutWithoutGet(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	require.Panics(t, func() { p.Put(&TestResource{}) })
 	require.Equal(t, State{Capacity: 1}, p.State())
@@ -58,7 +58,7 @@ func TestSuperPutWithoutGet(t *testing.T) {
 }
 
 func TestSuperGetWait(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	a := get(t, p)
 	time.Sleep(time.Millisecond)
@@ -82,7 +82,7 @@ func TestSuperGetWait(t *testing.T) {
 }
 
 func TestSuperGetWaitNil(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	get(t, p)
 	time.Sleep(time.Millisecond)
@@ -107,7 +107,7 @@ func TestSuperGetWaitNil(t *testing.T) {
 }
 
 func TestSuperPutTooFull(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
 	replaceState(p, func(s *State) {
@@ -124,7 +124,7 @@ func TestSuperPutTooFull(t *testing.T) {
 }
 
 func TestSuperDrainBlock(t *testing.T) {
-	p := NewSuperPool(SlowCloseFactory, 3, 3, 0, 0)
+	p := NewSuperPool(Opts{Factory: SlowCloseFactory, Capacity: 3, OpenWorkers: 1, CloseWorkers: 1})
 
 	var resources []Resource
 	for i := 0; i < 3; i++ {
@@ -156,7 +156,7 @@ func TestSuperDrainBlock(t *testing.T) {
 }
 
 func TestSuperDrainNoBlock(t *testing.T) {
-	p := NewSuperPool(SlowCloseFactory, 2, 2, 0, 0)
+	p := NewSuperPool(Opts{Factory: SlowCloseFactory, Capacity: 2, OpenWorkers: 1, CloseWorkers: 1})
 
 	var resources []Resource
 	for i := 0; i < 2; i++ {
@@ -179,7 +179,7 @@ func TestSuperDrainNoBlock(t *testing.T) {
 }
 
 func TestSuperGrowBlock(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 2, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	a := get(t, p)
 	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
@@ -196,7 +196,7 @@ func TestSuperGrowBlock(t *testing.T) {
 }
 
 func TestSuperGrowNoBlock(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 1, 2, 0, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
 	a := get(t, p)
 	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
@@ -219,7 +219,7 @@ func TestSuperFull1(t *testing.T) {
 		return state
 	}
 
-	p := NewSuperPool(PoolFactory, 10, 10, 0, 5)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 10, MinActive: 5, OpenWorkers: 1, CloseWorkers: 1})
 	time.Sleep(time.Millisecond * 10)
 
 	require.Equal(t, s(State{InPool: 5}), p.State())
@@ -266,7 +266,7 @@ func TestSuperFull2(t *testing.T) {
 	ctx := context.Background()
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 6, 6, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 6, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	err := p.SetCapacity(5, true)
 	require.NoError(t, err)
@@ -413,7 +413,7 @@ func TestSuperShrinking(t *testing.T) {
 	ctx := context.Background()
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	var resources [10]Resource
 	// Leave one empty slot in the pool
@@ -534,7 +534,7 @@ func TestSuperClosing(t *testing.T) {
 	ctx := context.Background()
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 	var resources [10]Resource
 	for i := 0; i < 5; i++ {
 		r, err := p.Get(ctx)
@@ -570,7 +570,7 @@ func TestSuperClosing(t *testing.T) {
 }
 
 func TestSuperGetAfterClose(t *testing.T) {
-	p := NewSuperPool(SlowCloseFactory, 5, 5, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: SlowCloseFactory, Capacity: 5, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 	a := get(t, p)
 
 	done := make(chan bool)
@@ -592,7 +592,7 @@ func TestSuperGetAfterClose(t *testing.T) {
 func TestSuperIdleTimeout(t *testing.T) {
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 1, 1, 10*time.Millisecond, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, IdleTimeout: 10 * time.Millisecond, OpenWorkers: 1, CloseWorkers: 1})
 
 	r := get(t, p)
 	require.Equal(t, 1, int(count.Get()))
@@ -652,7 +652,7 @@ func TestSuperCreateFail(t *testing.T) {
 	ctx := context.Background()
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(FailFactory, 5, 5, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: FailFactory, Capacity: 5, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	_, err := p.Get(ctx)
 	require.Error(t, err)
@@ -669,7 +669,7 @@ func TestSuperCreateFail(t *testing.T) {
 func TestSuperSlowCreateFail(t *testing.T) {
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(SlowFailFactory, 2, 2, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: SlowFailFactory, Capacity: 2, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	ch := make(chan bool)
 	// The third Get should not wait indefinitely
@@ -691,7 +691,7 @@ func TestSuperSlowCreateFail(t *testing.T) {
 
 func TestSuperTimeoutSlow(t *testing.T) {
 	ctx := context.Background()
-	p := NewSuperPool(SlowCreateFactory, 4, 4, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: SlowCreateFactory, Capacity: 4, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	var resources []Resource
 	for i := 0; i < 4; i++ {
@@ -717,7 +717,7 @@ func TestSuperTimeoutSlow(t *testing.T) {
 
 func TestSuperTimeoutPoolFull(t *testing.T) {
 	ctx := context.Background()
-	p := NewSuperPool(PoolFactory, 1, 1, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 
 	b := get(t, p)
 	expected := State{Capacity: 1, InUse: 1, IdleTimeout: time.Second}
@@ -742,7 +742,7 @@ func TestSuperTimeoutPoolFull(t *testing.T) {
 func TestSuperExpired(t *testing.T) {
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 1, 1, time.Second, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, IdleTimeout: time.Second, OpenWorkers: 1, CloseWorkers: 1})
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
 	r, err := p.Get(ctx)
 	if err == nil {
@@ -760,7 +760,7 @@ func TestSuperExpired(t *testing.T) {
 func TestSuperMinActive(t *testing.T) {
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 3)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: time.Second, MinActive: 3, OpenWorkers: 1, CloseWorkers: 1})
 	time.Sleep(time.Millisecond)
 
 	if p.Available() != 5 {
@@ -783,7 +783,7 @@ func TestSuperMinActiveWithExpiry(t *testing.T) {
 	timeout := time.Millisecond * 20
 	lastID.Set(0)
 	count.Set(0)
-	p := NewSuperPool(PoolFactory, 5, 5, timeout, 3)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: timeout, MinActive: 3, OpenWorkers: 1, CloseWorkers: 1})
 	time.Sleep(time.Millisecond)
 
 	require.Equal(t, 3, p.Active())
@@ -830,7 +830,7 @@ func TestSuperMinActiveWithExpiry(t *testing.T) {
 }
 
 func TestSuperMinActiveSelfRefreshing(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 3)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: time.Second, MinActive: 3, OpenWorkers: 1, CloseWorkers: 1})
 	time.Sleep(time.Millisecond)
 
 	// Get 5
@@ -858,11 +858,11 @@ func TestSuperMinActiveTooHigh(t *testing.T) {
 		}
 	}()
 
-	NewSuperPool(FailFactory, 1, 1, time.Second, 2)
+	NewSuperPool(Opts{Factory: FailFactory, Capacity: 1, IdleTimeout: time.Second, MinActive: 2, OpenWorkers: 1, CloseWorkers: 1})
 }
 
 func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {
-	p := NewSuperPool(PoolFactory, 100, 100, time.Millisecond, 0)
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 100, IdleTimeout: time.Millisecond, OpenWorkers: 100, CloseWorkers: 100})
 
 	done := make(chan bool)
 	go func() {
@@ -895,7 +895,7 @@ func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {
 }
 
 func TestSuperMinActiveTooHighAfterSetCapacity(t *testing.T) {
-	p := NewSuperPool(FailFactory, 3, 3, time.Second, 2)
+	p := NewSuperPool(Opts{Factory: FailFactory, Capacity: 3, IdleTimeout: time.Second, MinActive: 2, OpenWorkers: 1, CloseWorkers: 1})
 
 	require.NoError(t, p.SetCapacity(2, true))
 
@@ -909,7 +909,7 @@ func TestSuperMinActiveTooHighAfterSetCapacity(t *testing.T) {
 }
 
 func TestSuperGetPutRace(t *testing.T) {
-	p := NewSuperPool(SlowCreateFactory, 1, 1, 10*time.Nanosecond, 0)
+	p := NewSuperPool(Opts{Factory: SlowCreateFactory, Capacity: 1, IdleTimeout: 10 * time.Nanosecond, OpenWorkers: 20, CloseWorkers: 20})
 
 	for j := 0; j < 200; j++ {
 		done := make(chan bool)
@@ -934,4 +934,3 @@ func TestSuperGetPutRace(t *testing.T) {
 
 	p.Close()
 }
-
