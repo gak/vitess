@@ -44,8 +44,7 @@ type SuperPool struct {
 
 	newCapWait chan error
 
-	idleTimer *time.Ticker
-	idleChan  <-chan time.Time
+	idleChan <-chan time.Time
 
 	state atomic.Value
 }
@@ -100,10 +99,8 @@ func NewSuperPool(opts Opts) *SuperPool {
 
 func (p *SuperPool) updateIdleTimer(state *State) {
 	if state.IdleTimeout > 0 {
-		p.idleTimer = time.NewTicker(state.IdleTimeout / 10)
-		p.idleChan = p.idleTimer.C
+		p.idleChan = time.NewTicker(state.IdleTimeout / 10).C
 	} else {
-		p.idleTimer = nil
 		p.idleChan = nil
 	}
 }
@@ -117,45 +114,9 @@ func (p *SuperPool) main(state State) {
 
 	for {
 		//fmt.Printf("\n--- %+v\n\n", state)
-		p.state.Store(state)
-
-		if len(p.queue) > 0 && (state.activeTransient() < state.Capacity || state.InPool > 0) {
-			var get getCmd
-			get, p.queue = p.queue[0], p.queue[1:]
-			state.Waiters--
-			//fmt.Println("There is a queue! Spawning...", get.when)
-			get.execute(p, &state)
-			continue
-		}
-
-		// TODO(gak): Refactor this into something nicer.
-		if len(p.queue) > 0 {
-			idx := 0
-			for _, get := range p.queue {
-				select {
-				case <-get.ctx.Done():
-					//fmt.Println("Queued get has cancelled!")
-					state.Waiters--
-					get.callback <- resourceError(ErrTimeout)
-				default:
-					p.queue[idx] = get
-					idx++
-				}
-			}
-			p.queue = p.queue[:idx]
-		}
-
-		if !state.Draining {
-			toSpawn := p.MinActive() - state.InPool - state.InUse - state.Spawning
-			for i := 0; i < toSpawn; i++ {
-				select {
-				case p.open <- openReq{reason: forPool}:
-					state.Spawning++
-				default:
-				}
-			}
-		}
-
+		p.checkForWaiters(&state)
+		p.handleCancelled(&state)
+		p.createMinActive(&state)
 		p.state.Store(state)
 
 		select {
@@ -189,6 +150,46 @@ func (p *SuperPool) main(state State) {
 
 			p.pool = p.pool[:idx]
 		}
+	}
+}
+
+func (p *SuperPool) checkForWaiters(state *State) {
+	for len(p.queue) > 0 && (state.activeTransient() < state.Capacity || state.InPool > 0) {
+		var get getCmd
+		get, p.queue = p.queue[0], p.queue[1:]
+		state.Waiters--
+		//fmt.Println("There is a queue! Spawning...", get.when)
+		get.execute(p, state)
+	}
+}
+
+func (p *SuperPool) createMinActive(state *State) {
+	if !state.Draining {
+		toSpawn := p.MinActive() - state.InPool - state.InUse - state.Spawning
+		for i := 0; i < toSpawn; i++ {
+			select {
+			case p.open <- openReq{reason: forPool}:
+				state.Spawning++
+			default:
+			}
+		}
+	}
+}
+
+func (p *SuperPool) handleCancelled(state *State) {
+	if len(p.queue) > 0 {
+		idx := 0
+		for _, get := range p.queue {
+			select {
+			case <-get.ctx.Done():
+				state.Waiters--
+				get.callback <- resourceError(ErrTimeout)
+			default:
+				p.queue[idx] = get
+				idx++
+			}
+		}
+		p.queue = p.queue[:idx]
 	}
 }
 
