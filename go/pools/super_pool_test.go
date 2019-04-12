@@ -656,9 +656,8 @@ func TestSuperCreateFail(t *testing.T) {
 
 	_, err := p.Get(ctx)
 	require.Error(t, err)
-	if err.Error() != "Failed" {
-		t.Errorf("Expecting Failed, received %v", err)
-	}
+
+	require.EqualError(t, err, "Failed")
 	time.Sleep(time.Millisecond)
 	require.Equal(t, State{Capacity: 5, IdleTimeout: time.Second}, p.State())
 	require.Equal(t, 5, p.Available())

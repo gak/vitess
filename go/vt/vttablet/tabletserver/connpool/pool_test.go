@@ -153,6 +153,30 @@ func TestFastPoolConnPoolSetCapacity(t *testing.T) {
 	}
 }
 
+func TestSuperPoolConnPoolSetCapacity(t *testing.T) {
+	db := fakesqldb.New(t)
+	defer db.Close()
+	connPool := newPoolOpts(pools.SuperImpl, 10)
+	connPool.Open(db.ConnParams(), db.ConnParams(), db.ConnParams())
+	defer connPool.Close()
+	err := connPool.SetCapacity(-10)
+	if err == nil {
+		t.Fatalf("set capacity should return error for negative capacity")
+	}
+	err = connPool.SetCapacity(10)
+	if err != nil {
+		t.Fatalf("set capacity should succeed")
+	}
+	err = connPool.SetCapacity(9)
+	if err == nil {
+		t.Fatalf("set capacity should fail")
+	}
+	if connPool.Capacity() != 10 {
+		t.Fatalf("capacity should be 10")
+	}
+}
+
+
 func TestConnPoolStatJSON(t *testing.T) {
 	db := fakesqldb.New(t)
 	defer db.Close()

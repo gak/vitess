@@ -49,6 +49,7 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 		panic(fmt.Errorf("minActive %v higher than capacity %v", minActive, capacity))
 	}
 
+	// TODO(gak): Make this an option.
 	numOpeners := 100
 	numClosers := 100
 
@@ -104,22 +105,6 @@ func (p *SuperPool) main(state State) {
 		//fmt.Printf("\n--- %+v\n\n", state)
 		p.state.Store(state)
 
-		if state.Waiters < 0 {
-			panic("waiters too low...")
-		}
-
-		//// Sanity checks
-		//if !state.ignoreCapacityAsserts {
-		//	if len(p.pool) != state.InPool {
-		//		fmt.Println("XXXXXX actual pool size doesn't match InPool counter", len(p.pool), state.InPool)
-		//		panic("")
-		//	}
-		//	if !state.Draining && !state.Closed && len(p.pool)+state.InUse+state.Spawning+state.Closing > state.Capacity {
-		//		fmt.Printf("XXXXXX we are over capacity: %+v\n", state)
-		//		panic("")
-		//	}
-		//}
-
 		if len(p.queue) > 0 && (state.activeTransient() < state.Capacity || state.InPool > 0) {
 			var get getCmd
 			get, p.queue = p.queue[0], p.queue[1:]
@@ -129,7 +114,7 @@ func (p *SuperPool) main(state State) {
 			continue
 		}
 
-		// TODO(gak): Move this into a function that returns a channel.
+		// TODO(gak): Refactor this into something nicer.
 		if len(p.queue) > 0 {
 			idx := 0
 			for _, get := range p.queue {
@@ -137,7 +122,7 @@ func (p *SuperPool) main(state State) {
 				case <-get.ctx.Done():
 					//fmt.Println("Queued get has cancelled!")
 					state.Waiters--
-					get.callback <- errWrapper(ErrTimeout)
+					get.callback <- resourceError(ErrTimeout)
 				default:
 					p.queue[idx] = get
 					idx++
@@ -244,7 +229,7 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 	default:
 		state.Spawning--
 		state.Waiters--
-		cmd.callback <- errWrapper(ErrOpenBufferFull)
+		cmd.callback <- resourceError(ErrOpenBufferFull)
 	}
 }
 
@@ -260,13 +245,13 @@ func (cmd putCmd) execute(p *SuperPool, state *State) {
 	}
 
 	if state.InUse <= 0 {
-		cmd.callback <- errErr(ErrPutBeforeGet)
+		cmd.callback <- errWrap(ErrPutBeforeGet)
 		return
 	}
 
 	if state.InPool+state.InUse > state.Capacity {
 		if !state.Draining {
-			cmd.callback <- errErr(ErrFull)
+			cmd.callback <- errWrap(ErrFull)
 			return
 		}
 
@@ -309,7 +294,7 @@ func (cmd setCapCmd) execute(p *SuperPool, state *State) {
 
 	if state.Closed {
 		if cmd.wait != nil {
-			cmd.wait <- errErr(ErrClosed)
+			cmd.wait <- errWrap(ErrClosed)
 		}
 		return
 	}
@@ -478,7 +463,7 @@ func (p *SuperPool) opener() {
 				}
 
 				if err != nil {
-					doc.resource = errWrapper(err)
+					doc.resource = resourceError(err)
 				} else {
 					doc.resource = resourceWrapper{
 						resource: r,
@@ -493,7 +478,7 @@ func (p *SuperPool) opener() {
 					goto WaitForResource
 				}
 				aborted = true
-				doc.resource = errWrapper(ErrTimeout)
+				doc.resource = resourceError(ErrTimeout)
 				p.cmd <- doc
 
 				goto WaitForResource
@@ -538,7 +523,7 @@ func (p *SuperPool) Close() {
 
 func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 	if p.State().Closed {
-		return nil, errErr(ErrClosed)
+		return nil, errWrap(ErrClosed)
 	}
 
 	callback := make(chan resourceWrapper, 1)
@@ -567,8 +552,7 @@ func (p *SuperPool) Put(r Resource) {
 	err := <-ret
 	if err != nil {
 		fmt.Printf("error: %+v\n", err)
-		root := vterrors.RootCause(err)
-		if root == ErrFull || root == ErrPutBeforeGet {
+		if vterrors.Equals(err, ErrFull) || vterrors.Equals(err, ErrPutBeforeGet) {
 			panic(err)
 		}
 	}
@@ -576,7 +560,7 @@ func (p *SuperPool) Put(r Resource) {
 
 func (p *SuperPool) SetCapacity(size int, block bool) error {
 	if p.State().Closed {
-		return errErr(ErrClosed)
+		return errWrap(ErrClosed)
 	}
 
 	var wait chan error
@@ -656,14 +640,14 @@ func (p *SuperPool) StatsJSON() string {
 	return string(d)
 }
 
-func errErr(err error) error {
-	return strErr(err.Error())
+func errWrap(err error) error {
+	return vterrors.NewWithoutCode(err.Error())
 }
 
 func strErr(f string, s ...interface{}) error {
 	return vterrors.NewWithoutCode(fmt.Sprintf(f, s...))
 }
 
-func errWrapper(err error) resourceWrapper {
-	return resourceWrapper{err: errErr(err)}
+func resourceError(err error) resourceWrapper {
+	return resourceWrapper{err: errWrap(err)}
 }
