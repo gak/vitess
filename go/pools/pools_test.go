@@ -35,6 +35,7 @@ func benchmarkGetPut(b *testing.B, impl Impl, f CreateFactory, workers int, cap 
 				r, err := p.Get(context.Background())
 				if err != nil {
 					b.Error(err)
+					continue
 				}
 
 				s(1)

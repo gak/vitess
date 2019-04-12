@@ -13,12 +13,20 @@ func Benchmark_Fst_1Workers_10Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 1, 10)
 }
 
+func Benchmark_Sup_1Workers_10Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 1, 10)
+}
+
 func Benchmark_Res_1Workers_100Capacity(b *testing.B) {
 	benchmarkGetPut(b, 0, VerySlowFactory, 1, 100)
 }
 
 func Benchmark_Fst_1Workers_100Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 1, 100)
+}
+
+func Benchmark_Sup_1Workers_100Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 1, 100)
 }
 
 func Benchmark_Res_1Workers_1000Capacity(b *testing.B) {
@@ -29,12 +37,20 @@ func Benchmark_Fst_1Workers_1000Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 1, 1000)
 }
 
+func Benchmark_Sup_1Workers_1000Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 1, 1000)
+}
+
 func Benchmark_Res_10Workers_10Capacity(b *testing.B) {
 	benchmarkGetPut(b, 0, VerySlowFactory, 10, 10)
 }
 
 func Benchmark_Fst_10Workers_10Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 10, 10)
+}
+
+func Benchmark_Sup_10Workers_10Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 10, 10)
 }
 
 func Benchmark_Res_10Workers_100Capacity(b *testing.B) {
@@ -45,12 +61,20 @@ func Benchmark_Fst_10Workers_100Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 10, 100)
 }
 
+func Benchmark_Sup_10Workers_100Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 10, 100)
+}
+
 func Benchmark_Res_10Workers_1000Capacity(b *testing.B) {
 	benchmarkGetPut(b, 0, VerySlowFactory, 10, 1000)
 }
 
 func Benchmark_Fst_10Workers_1000Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 10, 1000)
+}
+
+func Benchmark_Sup_10Workers_1000Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 10, 1000)
 }
 
 func Benchmark_Res_100Workers_10Capacity(b *testing.B) {
@@ -61,6 +85,10 @@ func Benchmark_Fst_100Workers_10Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 100, 10)
 }
 
+func Benchmark_Sup_100Workers_10Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 100, 10)
+}
+
 func Benchmark_Res_100Workers_100Capacity(b *testing.B) {
 	benchmarkGetPut(b, 0, VerySlowFactory, 100, 100)
 }
@@ -69,11 +97,19 @@ func Benchmark_Fst_100Workers_100Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 100, 100)
 }
 
+func Benchmark_Sup_100Workers_100Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 100, 100)
+}
+
 func Benchmark_Res_100Workers_1000Capacity(b *testing.B) {
 	benchmarkGetPut(b, 0, VerySlowFactory, 100, 1000)
 }
 
 func Benchmark_Fst_100Workers_1000Capacity(b *testing.B) {
 	benchmarkGetPut(b, 1, VerySlowFactory, 100, 1000)
+}
+
+func Benchmark_Sup_100Workers_1000Capacity(b *testing.B) {
+	benchmarkGetPut(b, 2, VerySlowFactory, 100, 1000)
 }
 

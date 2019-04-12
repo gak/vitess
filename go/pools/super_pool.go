@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"sync/atomic"
 	"time"
 	"vitess.io/vitess/go/vt/vterrors"
@@ -15,6 +14,7 @@ var _ Pool = &SuperPool{}
 type SuperPool struct {
 	factory CreateFactory
 	pool    []resourceWrapper
+	queue   []getCmd
 	cmd     chan command
 
 	// worker goroutines to close
@@ -24,10 +24,10 @@ type SuperPool struct {
 	final chan bool
 
 	// Opener
-	open chan openRequest
+	open chan openReq
 
 	// Closer
-	close chan closeRequest
+	close chan closeReq
 
 	// The number of workers that need to exit when closing.
 	workers int
@@ -35,14 +35,9 @@ type SuperPool struct {
 	newCapWait chan error
 
 	idleTimer *time.Ticker
+	idleChan  <-chan time.Time
 
 	state atomic.Value
-}
-
-// Commands
-
-type command interface {
-	execute(p *SuperPool, state *State)
 }
 
 // NewSuperPool
@@ -54,14 +49,14 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 		panic(fmt.Errorf("minActive %v higher than capacity %v", minActive, capacity))
 	}
 
-	numOpeners := 1
-	numClosers := 1
+	numOpeners := 100
+	numClosers := 100
 
 	p := &SuperPool{
 		factory:  factory,
-		cmd:      make(chan command),
-		open:     make(chan openRequest, numOpeners),
-		close:    make(chan closeRequest, capacity),
+		cmd:      make(chan command, 1),
+		open:     make(chan openReq, capacity),
+		close:    make(chan closeReq, capacity),
 		finished: make(chan bool),
 		final:    make(chan bool),
 	}
@@ -91,38 +86,78 @@ func NewSuperPool(factory CreateFactory, capacity, maxCap int, idleTimeout time.
 func (p *SuperPool) updateIdleTimer(state *State) {
 	if state.IdleTimeout > 0 {
 		p.idleTimer = time.NewTicker(state.IdleTimeout / 10)
+		p.idleChan = p.idleTimer.C
 	} else {
-		p.idleTimer = time.NewTicker(100 * time.Millisecond)
+		p.idleTimer = nil
+		p.idleChan = nil
 	}
+}
+
+func (state *State) activeTransient() int {
+	return state.InPool + state.InUse + state.Spawning + state.Closing
 }
 
 func (p *SuperPool) main(state State) {
 	p.updateIdleTimer(&state)
 
 	for {
-		fmt.Printf("\n--- %+v\n\n", state)
+		//fmt.Printf("\n--- %+v\n\n", state)
 		p.state.Store(state)
 
-		// Sanity checks
-		if !state.ignoreCapacityAsserts {
-			if len(p.pool) != state.InPool {
-				fmt.Println("XXXXXX actual pool size doesn't match InPool counter", len(p.pool), state.InPool)
-				panic("")
+		if state.Waiters < 0 {
+			panic("waiters too low...")
+		}
+
+		//// Sanity checks
+		//if !state.ignoreCapacityAsserts {
+		//	if len(p.pool) != state.InPool {
+		//		fmt.Println("XXXXXX actual pool size doesn't match InPool counter", len(p.pool), state.InPool)
+		//		panic("")
+		//	}
+		//	if !state.Draining && !state.Closed && len(p.pool)+state.InUse+state.Spawning+state.Closing > state.Capacity {
+		//		fmt.Printf("XXXXXX we are over capacity: %+v\n", state)
+		//		panic("")
+		//	}
+		//}
+
+		if len(p.queue) > 0 && (state.activeTransient() < state.Capacity || state.InPool > 0) {
+			var get getCmd
+			get, p.queue = p.queue[0], p.queue[1:]
+			state.Waiters--
+			//fmt.Println("There is a queue! Spawning...", get.when)
+			get.execute(p, &state)
+			continue
+		}
+
+		// TODO(gak): Move this into a function that returns a channel.
+		if len(p.queue) > 0 {
+			idx := 0
+			for _, get := range p.queue {
+				select {
+				case <-get.ctx.Done():
+					//fmt.Println("Queued get has cancelled!")
+					state.Waiters--
+					get.callback <- errWrapper(ErrTimeout)
+				default:
+					p.queue[idx] = get
+					idx++
+				}
 			}
-			if len(p.pool)+state.InUse > state.Capacity {
-				fmt.Printf("XXXXXX we are over capacity: %+v\n", state)
-				panic("")
-			}
+			p.queue = p.queue[:idx]
 		}
 
 		if !state.Draining {
-			for i := 0; i < p.MinActive()-state.InPool-state.InUse-state.Spawning; i++ {
-				state.Spawning++
-				p.open <- openRequest{
-					reason: forPool,
+			toSpawn := p.MinActive() - state.InPool - state.InUse - state.Spawning
+			for i := 0; i < toSpawn; i++ {
+				select {
+				case p.open <- openReq{reason: forPool}:
+					state.Spawning++
+				default:
 				}
 			}
 		}
+
+		p.state.Store(state)
 
 		select {
 		case <-p.final:
@@ -133,23 +168,26 @@ func (p *SuperPool) main(state State) {
 				return
 			}
 
-			fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
+			//fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
 			cmd.execute(p, &state)
 
-		case <-p.idleTimer.C:
+		case <-p.idleChan:
+			//fmt.Println("Timer")
 			idx := 0
 			for _, w := range p.pool {
 				deadline := w.timeUsed.Add(state.IdleTimeout)
+				//fmt.Println("Time check", deadline.Sub(time.Now()))
 				if time.Now().Before(deadline) {
 					p.pool[idx] = w
 					idx++
 					continue
 				}
 
+				//fmt.Println("Timeout on resource...")
 				state.InPool--
 				state.Closing++
 				state.IdleClosed++
-				p.close <- closeRequest{
+				p.close <- closeReq{
 					wrapper: w,
 				}
 			}
@@ -159,65 +197,86 @@ func (p *SuperPool) main(state State) {
 	}
 }
 
-type getCommand struct {
-	callback chan resourceWrapper
-	ctx      context.Context
+type command interface {
+	execute(p *SuperPool, state *State)
 }
 
-func (cmd getCommand) execute(p *SuperPool, state *State) {
+type getCmd struct {
+	callback chan resourceWrapper
+	ctx      context.Context
+	when     time.Time
+}
+
+func (cmd getCmd) execute(p *SuperPool, state *State) {
 	if len(p.pool) > 0 {
 		var r resourceWrapper
 		r, p.pool = p.pool[0], p.pool[1:]
 		state.InPool--
 		state.InUse++
-		fmt.Println("Already in pool, serving...")
+		if !cmd.when.IsZero() {
+			state.WaitCount++
+			state.WaitTime += time.Now().Sub(cmd.when)
+		}
 		cmd.callback <- r
+		return
+	}
+
+	if state.activeTransient() >= state.Capacity {
+		state.Waiters++
+		if !cmd.when.IsZero() {
+			panic("wtf")
+		}
+		cmd.when = time.Now()
+		//fmt.Println("LongWaiting.....")
+		p.queue = append(p.queue, cmd)
 		return
 	}
 
 	state.Spawning++
 	state.Waiters++
 	select {
-	case p.open <- openRequest{
+	case p.open <- openReq{
 		reason:   forUse,
 		callback: cmd.callback,
 		ctx:      cmd.ctx,
+		when:     cmd.when,
 	}:
 	default:
 		state.Spawning--
 		state.Waiters--
-		cmd.callback <- resourceWrapper{
-			err: vterrors.Wrap(ErrOpenBufferFull, ""),
-		}
+		cmd.callback <- errWrapper(ErrOpenBufferFull)
 	}
 }
 
-type putCommand struct {
+type putCmd struct {
 	callback chan error
 	resource Resource
 }
 
-func (cmd putCommand) execute(p *SuperPool, state *State) {
+func (cmd putCmd) execute(p *SuperPool, state *State) {
 	wrapper := resourceWrapper{
 		resource: cmd.resource,
 		timeUsed: time.Now(),
 	}
 
 	if state.InUse <= 0 {
-		cmd.callback <- vterrors.Wrap(ErrPutBeforeGet, "")
+		cmd.callback <- errErr(ErrPutBeforeGet)
 		return
 	}
 
 	if state.InPool+state.InUse > state.Capacity {
 		if !state.Draining {
-			cmd.callback <- vterrors.Wrap(ErrFull, "")
+			cmd.callback <- errErr(ErrFull)
 			return
 		}
 
 		state.InUse--
+		if state.InUse < 0 {
+			panic("aaaaaaa")
+		}
 		if cmd.resource != nil {
 			state.Closing++
-			p.close <- closeRequest{
+			p.close <- closeReq{
 				wrapper: wrapper,
 			}
 		}
@@ -230,17 +289,19 @@ func (cmd putCommand) execute(p *SuperPool, state *State) {
 		state.InPool++
 	}
 	state.InUse--
+	if state.InUse < 0 {
+		panic("bbbbbb")
+	}
 	cmd.callback <- nil
 }
 
-type setCapacityCommand struct {
+type setCapCmd struct {
 	size int
 	wait chan error
 }
 
-func (cmd setCapacityCommand) execute(p *SuperPool, state *State) {
-	// TODO(gak): If anyone has been waiting for an existing setCapacity, we tell them it's done
-	//  immediately because it'll get hairy to track multiple setCapacity's for now.
+func (cmd setCapCmd) execute(p *SuperPool, state *State) {
+	// Only allow one running SetCapacity at a time.
 	if p.newCapWait != nil {
 		p.newCapWait <- nil
 		p.newCapWait = nil
@@ -248,13 +309,31 @@ func (cmd setCapacityCommand) execute(p *SuperPool, state *State) {
 
 	if state.Closed {
 		if cmd.wait != nil {
-			cmd.wait <- vterrors.Wrap(ErrClosed, "")
+			cmd.wait <- errErr(ErrClosed)
+		}
+		return
+	}
+
+	if cmd.size < 0 {
+		if cmd.wait != nil {
+			cmd.wait <- strErr("capacity %d is out of range", cmd.size)
+		}
+		return
+	}
+
+	if cmd.size > 0 && state.MinActive > cmd.size {
+		if cmd.wait != nil {
+			cmd.wait <- strErr("minActive %v would now be higher than capacity %v", state.MinActive, cmd.size)
 		}
 		return
 	}
 
 	state.Capacity = cmd.size
 	toDrain := state.InPool + state.InUse - state.Capacity
+
+	if state.Capacity == 0 {
+		state.Closed = true
+	}
 
 	if toDrain > 0 {
 		var drain []resourceWrapper
@@ -263,16 +342,13 @@ func (cmd setCapacityCommand) execute(p *SuperPool, state *State) {
 		if state.InPool < toDrain {
 			drain, p.pool = p.pool, []resourceWrapper{}
 			toDrain -= state.InPool
-			if state.Capacity == 0 {
-				state.Closed = true
-			}
 		} else {
 			drain, p.pool = p.pool[:toDrain], p.pool[toDrain:]
 		}
 		state.InPool -= len(drain)
 		state.Closing += len(drain)
 		for _, w := range drain {
-			p.close <- closeRequest{
+			p.close <- closeReq{
 				wrapper: w,
 			}
 		}
@@ -283,29 +359,28 @@ func (cmd setCapacityCommand) execute(p *SuperPool, state *State) {
 	}
 }
 
-type setIdleTimeoutCommand struct {
+type setTimeoutCmd struct {
 	timeout time.Duration
 }
 
-func (cmd setIdleTimeoutCommand) execute(p *SuperPool, state *State) {
+func (cmd setTimeoutCmd) execute(p *SuperPool, state *State) {
 	state.IdleTimeout = cmd.timeout
 	p.updateIdleTimer(state)
 }
 
-// Internal channel messages
-
-type openRequest struct {
+type openReq struct {
 	callback chan resourceWrapper
 	reason   createType
 	ctx      context.Context
+	when     time.Time
 }
 
-type didOpenCommand struct {
-	request  openRequest
+type didOpenCmd struct {
+	request  openReq
 	resource resourceWrapper
 }
 
-func (cmd didOpenCommand) execute(p *SuperPool, state *State) {
+func (cmd didOpenCmd) execute(p *SuperPool, state *State) {
 	state.Spawning--
 	if cmd.resource.err != nil {
 		if cmd.request.reason == forUse {
@@ -324,23 +399,27 @@ func (cmd didOpenCommand) execute(p *SuperPool, state *State) {
 	case forUse:
 		state.InUse++
 		state.Waiters--
+
+		if !cmd.request.when.IsZero() {
+			state.WaitCount++
+			state.WaitTime += time.Now().Sub(cmd.request.when)
+		}
 	}
 	if cmd.request.callback != nil {
 		cmd.request.callback <- cmd.resource
 	}
 }
 
-type closeRequest struct {
+type closeReq struct {
 	wrapper resourceWrapper
 }
 
-type didCloseCommand struct{}
+type didClose struct{}
 
-func (cmd didCloseCommand) execute(p *SuperPool, state *State) {
+func (cmd didClose) execute(p *SuperPool, state *State) {
 	state.Closing--
 
 	if state.Draining && state.Capacity >= state.InPool+state.InUse+state.Closing {
-		fmt.Println("Draining finished!")
 		state.Draining = false
 		if state.Capacity == 0 {
 			state.Closed = true
@@ -349,10 +428,9 @@ func (cmd didCloseCommand) execute(p *SuperPool, state *State) {
 			p.newCapWait <- nil
 			p.newCapWait = nil
 		}
+		return
 	}
 }
-
-// Used for testing
 
 type testingOnlyReplaceState struct {
 	state State
@@ -373,23 +451,24 @@ func (p *SuperPool) opener() {
 				return
 			}
 
-			var r Resource
-			var err error
 			aborted := false;
 			done := make(chan bool)
-			doc := didOpenCommand{
+			doc := didOpenCmd{
 				request: requester,
 			}
-			go func() {
-				r, err = p.factory()
-				done <- true
-			}()
 
 			maybeCtx := requester.ctx
 			var cancelChan <-chan struct{}
 			if maybeCtx != nil {
 				cancelChan = maybeCtx.Done()
 			}
+
+			var r Resource
+			var err error
+			go func() {
+				r, err = p.factory()
+				done <- true
+			}()
 
 		WaitForResource:
 			select {
@@ -399,9 +478,7 @@ func (p *SuperPool) opener() {
 				}
 
 				if err != nil {
-					doc.resource = resourceWrapper{
-						err: err,
-					}
+					doc.resource = errWrapper(err)
 				} else {
 					doc.resource = resourceWrapper{
 						resource: r,
@@ -412,13 +489,11 @@ func (p *SuperPool) opener() {
 
 			case <-cancelChan:
 				if aborted {
-					// Caller has cancelled again...
+					// Caller has cancelled again. We ignore these.
 					goto WaitForResource
 				}
 				aborted = true
-				doc.resource = resourceWrapper{
-					err: ErrTimeout,
-				}
+				doc.resource = errWrapper(ErrTimeout)
 				p.cmd <- doc
 
 				goto WaitForResource
@@ -439,16 +514,15 @@ func (p *SuperPool) closer() {
 			}
 			req.wrapper.resource.Close()
 			req.wrapper.resource = nil
-			p.cmd <- didCloseCommand{}
+			p.cmd <- didClose{}
 		}
 	}
 }
 
 func (p *SuperPool) Close() {
-	fmt.Println("Closing!")
-
 	err := p.SetCapacity(0, true)
 	if err != nil {
+		fmt.Printf("%+v\n", err)
 		panic(err)
 	}
 
@@ -460,17 +534,15 @@ func (p *SuperPool) Close() {
 	close(p.open)
 	close(p.close)
 	close(p.cmd)
-
-	fmt.Println("Fully Closed!")
 }
 
 func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 	if p.State().Closed {
-		return nil, vterrors.Wrap(ErrClosed, "")
+		return nil, errErr(ErrClosed)
 	}
 
 	callback := make(chan resourceWrapper, 1)
-	p.cmd <- getCommand{
+	p.cmd <- getCmd{
 		callback: callback,
 		ctx:      ctx,
 	}
@@ -488,7 +560,7 @@ func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 
 func (p *SuperPool) Put(r Resource) {
 	ret := make(chan error, 1)
-	p.cmd <- putCommand{
+	p.cmd <- putCmd{
 		callback: ret,
 		resource: r,
 	}
@@ -504,14 +576,14 @@ func (p *SuperPool) Put(r Resource) {
 
 func (p *SuperPool) SetCapacity(size int, block bool) error {
 	if p.State().Closed {
-		return vterrors.Wrap(ErrClosed, "")
+		return errErr(ErrClosed)
 	}
 
 	var wait chan error
 	if block {
 		wait = make(chan error, 1)
 	}
-	p.cmd <- setCapacityCommand{
+	p.cmd <- setCapCmd{
 		size: size,
 		wait: wait,
 	}
@@ -522,7 +594,7 @@ func (p *SuperPool) SetCapacity(size int, block bool) error {
 }
 
 func (p *SuperPool) SetIdleTimeout(duration time.Duration) {
-	p.cmd <- setIdleTimeoutCommand{timeout: duration}
+	p.cmd <- setTimeoutCmd{timeout: duration}
 }
 
 func (p *SuperPool) Capacity() int {
@@ -582,4 +654,16 @@ func (p *SuperPool) StatsJSON() string {
 		return ""
 	}
 	return string(d)
+}
+
+func errErr(err error) error {
+	return strErr(err.Error())
+}
+
+func strErr(f string, s ...interface{}) error {
+	return vterrors.NewWithoutCode(fmt.Sprintf(f, s...))
+}
+
+func errWrapper(err error) resourceWrapper {
+	return resourceWrapper{err: errErr(err)}
 }

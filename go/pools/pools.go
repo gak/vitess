@@ -62,7 +62,7 @@ type Resource interface {
 type resourceWrapper struct {
 	resource Resource
 	timeUsed time.Time
-	err error
+	err      error
 }
 
 type Impl int
@@ -70,6 +70,7 @@ type Impl int
 const (
 	ResourceImpl Impl = iota
 	FastImpl
+	SuperImpl
 )
 
 func New(poolImpl Impl, f CreateFactory, cap, maxCap int, idleTimeout time.Duration, minActive int) Pool {
@@ -85,6 +86,8 @@ func New(poolImpl Impl, f CreateFactory, cap, maxCap int, idleTimeout time.Durat
 		return NewResourcePool(f, cap, maxCap, idleTimeout)
 	case FastImpl:
 		return NewFastPool(f, cap, maxCap, idleTimeout, minActive)
+	case SuperImpl:
+		return NewSuperPool(f, cap, maxCap, idleTimeout, minActive)
 	}
 
 	return nil

@@ -72,10 +72,37 @@ func TestSuperGetWait(t *testing.T) {
 
 	b := get(t, p)
 	time.Sleep(time.Millisecond)
-	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+	wt := p.State().WaitTime
+	require.Equal(t, State{Capacity: 1, InUse: 1, WaitCount: 1, WaitTime: wt}, p.State())
 
 	p.Put(b)
-	require.Equal(t, State{Capacity: 1, InPool: 1}, p.State())
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InPool: 1, WaitCount: 1, WaitTime: wt}, p.State())
+	p.Close()
+}
+
+func TestSuperGetWaitNil(t *testing.T) {
+	p := NewSuperPool(PoolFactory, 1, 1, 0, 0)
+
+	get(t, p)
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+
+	go func() {
+		time.Sleep(time.Millisecond * 10)
+		require.Equal(t, State{Capacity: 1, InUse: 1, Waiters: 1}, p.State())
+		p.Put(nil)
+	}()
+
+	b := get(t, p)
+	time.Sleep(time.Millisecond)
+	wt := p.State().WaitTime
+	require.Equal(t, State{Capacity: 1, InUse: 1, WaitCount: 1, WaitTime: wt}, p.State())
+
+	p.Put(b)
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InPool: 1, WaitCount: 1, WaitTime: wt}, p.State())
+
 	p.Close()
 }
 
@@ -85,7 +112,6 @@ func TestSuperPutTooFull(t *testing.T) {
 	// Not sure how to cause the ErrFull panic naturally, so I'm hacking in a value.
 	replaceState(p, func(s *State) {
 		s.InUse = 2
-		s.ignoreCapacityAsserts = true
 	})
 
 	require.Panics(t, func() { p.Put(&TestResource{}) })
@@ -108,8 +134,6 @@ func TestSuperDrainBlock(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	require.Equal(t, State{Capacity: 3, InUse: 2, InPool: 1}, p.State())
 
-	fmt.Println("1")
-
 	done := make(chan bool)
 	go func() {
 		require.NoError(t, p.SetCapacity(1, true))
@@ -117,13 +141,10 @@ func TestSuperDrainBlock(t *testing.T) {
 		done <- true
 	}()
 
-	fmt.Println("2")
-
 	time.Sleep(time.Millisecond * 30)
 	// The first resource should be closed by now, but waiting for the second to unblock.
 	require.Equal(t, State{Capacity: 1, Draining: true, InUse: 2}, p.State())
 
-	fmt.Println("3")
 	p.Put(resources[1])
 
 	<-done
@@ -191,332 +212,323 @@ func TestSuperGrowNoBlock(t *testing.T) {
 	p.Close()
 }
 
-//func TestSuperFull1(t *testing.T) {
-//	s := func(state State) State {
-//		state.Capacity = 10
-//		state.MinActive = 5
-//		return state
-//	}
-//
-//	p := NewSuperPool(PoolFactory, 10, 10, 0, 5)
-//	time.Sleep(time.Millisecond)
-//
-//	require.Equal(t, s(State{InPool: 5}), p.State())
-//
-//	a := get(t, p)
-//	require.Equal(t, s(State{InPool: 4, InUse: 1}), p.State())
-//
-//	var resources []Resource
-//	for i := 0; i < 9; i++ {
-//		resources = append(resources, get(t, p))
-//	}
-//	require.Equal(t, s(State{InPool: 0, InUse: 10}), p.State())
-//
-//	var b Resource
-//	done := make(chan bool)
-//	go func() {
-//		t.Helper()
-//		b = get(t, p)
-//		done <- true
-//	}()
-//	time.Sleep(time.Millisecond)
-//	require.Equal(t, s(State{InPool: 0, InUse: 10, Waiters: 1}), p.State())
-//
-//	p.Put(a)
-//	<-done
-//	require.NotZero(t, p.State().WaitTime)
-//	wt := p.State().WaitTime
-//	require.Equal(t, s(State{InPool: 0, InUse: 10, Waiters: 0, WaitCount: 1, WaitTime: wt}), p.State())
-//
-//	p.Put(b)
-//	require.Equal(t, s(State{InPool: 1, InUse: 9, Waiters: 0, WaitCount: 1, WaitTime: wt}), p.State())
-//
-//	// Clean up
-//	for _, r := range resources {
-//		p.Put(r)
-//	}
-//
-//	p.Close()
-//}
-//
-//func TestSuperFull2(t *testing.T) {
-//	ctx := context.Background()
-//	lastID.Set(0)
-//	count.Set(0)
-//	p := NewSuperPool(PoolFactory, 6, 6, time.Second, 0)
-//
-//	err := p.SetCapacity(5, true)
-//	require.NoError(t, err)
-//	var resources [10]Resource
-//
-//	for i := 0; i < 5; i++ {
-//		r, err := p.Get(ctx)
-//		resources[i] = r
-//		if err != nil {
-//			t.Errorf("Unexpected error %v", err)
-//		}
-//		if p.Available() != 5-i-1 {
-//			t.Errorf("expecting %d, received %d", 5-i-1, p.Available())
-//			return
-//		}
-//		if p.WaitCount() != 0 {
-//			t.Errorf("expecting 0, received %d", p.WaitCount())
-//			return
-//		}
-//		if p.WaitTime() != 0 {
-//			t.Errorf("expecting 0, received %d", p.WaitTime())
-//		}
-//		if lastID.Get() != int64(i+1) {
-//			t.Errorf("Expecting %d, received %d", i+1, lastID.Get())
-//		}
-//		if count.Get() != int64(i+1) {
-//			t.Errorf("Expecting %d, received %d", i+1, count.Get())
-//		}
-//	}
-//
-//	ch := make(chan bool)
-//	go func() {
-//		for i := 0; i < 5; i++ {
-//			r, err := p.Get(ctx)
-//			if err != nil {
-//				t.Errorf("Get failed: %v", err)
-//				panic("exit")
-//			}
-//			resources[i] = r
-//		}
-//		for i := 0; i < 5; i++ {
-//			p.Put(resources[i])
-//		}
-//		ch <- true
-//	}()
-//	for i := 0; i < 5; i++ {
-//		// Sleep to ensure the goroutine waits
-//		time.Sleep(10 * time.Millisecond)
-//		p.Put(resources[i])
-//	}
-//	<-ch
-//	if p.WaitCount() != 5 {
-//		t.Errorf("Expecting 5, received %d", p.WaitCount())
-//	}
-//	if p.WaitTime() == 0 {
-//		t.Errorf("Expecting non-zero")
-//	}
-//	if lastID.Get() != 5 {
-//		t.Errorf("Expecting 5, received %d", lastID.Get())
-//	}
-//
-//	// TestSuper Close resource
-//	r, err := p.Get(ctx)
-//	if err != nil {
-//		t.Errorf("Unexpected error %v", err)
-//	}
-//	r.Close()
-//
-//	p.Put(nil)
-//	if count.Get() != 4 {
-//		t.Errorf("Expecting 4, received %d", count.Get())
-//	}
-//	for i := 0; i < 5; i++ {
-//		r, err := p.Get(ctx)
-//		if err != nil {
-//			t.Errorf("Get failed: %v", err)
-//		}
-//		resources[i] = r
-//	}
-//	for i := 0; i < 5; i++ {
-//		p.Put(resources[i])
-//	}
-//	if count.Get() != 5 {
-//		t.Errorf("Expecting 5, received %d", count.Get())
-//	}
-//	if lastID.Get() != 6 {
-//		t.Errorf("Expecting 6, received %d", lastID.Get())
-//	}
-//	// SetCapacity
-//	p.SetCapacity(3, true)
-//	if count.Get() != 3 {
-//		t.Errorf("Expecting 3, received %d", count.Get())
-//		return
-//	}
-//	if lastID.Get() != 6 {
-//		t.Errorf("Expecting 6, received %d", lastID.Get())
-//	}
-//	if p.Capacity() != 3 {
-//		t.Errorf("Expecting 3, received %d", p.Capacity())
-//	}
-//	if p.Available() != 3 {
-//		t.Errorf("Expecting 3, received %d", p.Available())
-//	}
-//	p.SetCapacity(6, true)
-//	if p.Capacity() != 6 {
-//		t.Errorf("Expecting 6, received %d", p.Capacity())
-//	}
-//	if p.Available() != 6 {
-//		t.Errorf("Expecting 6, received %d", p.Available())
-//	}
-//	for i := 0; i < 6; i++ {
-//		r, err := p.Get(ctx)
-//		if err != nil {
-//			t.Errorf("Get failed: %v", err)
-//		}
-//		resources[i] = r
-//	}
-//	for i := 0; i < 6; i++ {
-//		p.Put(resources[i])
-//	}
-//	if count.Get() != 6 {
-//		t.Errorf("Expecting 5, received %d", count.Get())
-//	}
-//	if lastID.Get() != 9 {
-//		t.Errorf("Expecting 9, received %d", lastID.Get())
-//	}
-//
-//	// Close
-//	p.Close()
-//	if p.Capacity() != 0 {
-//		t.Errorf("Expecting 0, received %d", p.Capacity())
-//	}
-//	if p.Available() != 0 {
-//		t.Errorf("Expecting 0, received %d", p.Available())
-//	}
-//	if count.Get() != 0 {
-//		t.Errorf("Expecting 0, received %d", count.Get())
-//	}
-//
-//	p.Close()
-//}
-//
-//func TestSuperShrinking(t *testing.T) {
-//	ctx := context.Background()
-//	lastID.Set(0)
-//	count.Set(0)
-//	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 0)
-//	defer p.Close()
-//
-//	var resources [10]Resource
-//	// Leave one empty slot in the pool
-//	for i := 0; i < 4; i++ {
-//		resources[i] = get(t, p)
-//	}
-//
-//	done := make(chan bool)
-//	go func() {
-//		t.Helper()
-//		require.NoError(t, p.SetCapacity(3, true))
-//		done <- true
-//	}()
-//	time.Sleep(time.Millisecond)
-//	require.Equal(t, State{Capacity: 3, InUse: 4, IdleTimeout: time.Second, Draining: true}, p.State())
-//	require.Equal(t, 0, p.Available())
-//	require.Equal(t, 4, p.Active())
-//
-//	// There are already 2 resources available in the pool.
-//	// So, returning one should be enough for SetCapacity to complete.
-//	p.Put(resources[3])
-//	<-done
-//	time.Sleep(time.Millisecond * 10)
-//
-//	// Return the rest of the resources
-//	for i := 0; i < 3; i++ {
-//		p.Put(resources[i])
-//	}
-//	time.Sleep(time.Millisecond * 10)
-//
-//	require.Equal(t, State{Capacity: 3, InPool: 3, IdleTimeout: time.Second}, p.State())
-//	require.Equal(t, 3, p.Available())
-//	require.Equal(t, 3, p.Active())
-//	require.Equal(t, 3, int(count.Get()))
-//
-//	// Ensure no deadlock if SetCapacity is called after we start
-//	// waiting for a resource
-//	var err error
-//	for i := 0; i < 3; i++ {
-//		resources[i] = get(t, p)
-//	}
-//	// This will wait because pool is empty
-//	go func() {
-//		r := get(t, p)
-//		p.Put(r)
-//		done <- true
-//	}()
-//
-//	// This will also wait
-//	go func() {
-//		p.SetCapacity(2, true)
-//		done <- true
-//	}()
-//	time.Sleep(10 * time.Millisecond)
-//
-//	// This should not hang
-//	for i := 0; i < 3; i++ {
-//		p.Put(resources[i])
-//	}
-//	<-done
-//	<-done
-//	time.Sleep(time.Millisecond)
-//
-//	if p.Capacity() != 2 {
-//		t.Errorf("Expecting 2, received %d", p.Capacity())
-//	}
-//	if p.Available() != 2 {
-//		t.Errorf("Expecting 2, received %d", p.Available())
-//	}
-//	if p.WaitCount() != 1 {
-//		t.Errorf("Expecting 1, received %d", p.WaitCount())
-//		return
-//	}
-//	if count.Get() != 2 {
-//		t.Errorf("Expecting 2, received %d", count.Get())
-//	}
-//
-//	// TestSuper race condition of SetCapacity with itself
-//	p.SetCapacity(3, true)
-//	for i := 0; i < 3; i++ {
-//		resources[i], err = p.Get(ctx)
-//		if err != nil {
-//			t.Errorf("Unexpected error %v", err)
-//		}
-//	}
-//	// This will wait because pool is empty
-//	go func() {
-//		r, err := p.Get(ctx)
-//		if err != nil {
-//			t.Errorf("Unexpected error %v", err)
-//		}
-//		p.Put(r)
-//		done <- true
-//	}()
-//	time.Sleep(10 * time.Millisecond)
-//
-//	// This will wait till we Put
-//	go p.SetCapacity(2, true)
-//	time.Sleep(10 * time.Millisecond)
-//	go p.SetCapacity(4, true)
-//	time.Sleep(10 * time.Millisecond)
-//
-//	// This should not hang
-//	for i := 0; i < 3; i++ {
-//		p.Put(resources[i])
-//	}
-//	<-done
-//
-//	err = p.SetCapacity(-1, true)
-//	if err == nil {
-//		t.Errorf("Expecting error")
-//	}
-//	err = p.SetCapacity(255555, true)
-//	time.Sleep(time.Millisecond)
-//	if err == nil {
-//		t.Errorf("Expecting error")
-//	}
-//
-//	if p.Capacity() != 4 {
-//		t.Errorf("Expecting 4, received %d", p.Capacity())
-//	}
-//	if p.Available() != 4 {
-//		t.Errorf("Expecting 4, received %d", p.Available())
-//	}
-//}
+func TestSuperFull1(t *testing.T) {
+	s := func(state State) State {
+		state.Capacity = 10
+		state.MinActive = 5
+		return state
+	}
+
+	p := NewSuperPool(PoolFactory, 10, 10, 0, 5)
+	time.Sleep(time.Millisecond * 10)
+
+	require.Equal(t, s(State{InPool: 5}), p.State())
+
+	a := get(t, p)
+	require.Equal(t, s(State{InPool: 4, InUse: 1}), p.State())
+
+	var resources []Resource
+	for i := 0; i < 9; i++ {
+		resources = append(resources, get(t, p))
+	}
+	require.Equal(t, s(State{InPool: 0, InUse: 10}), p.State())
+
+	var b Resource
+	done := make(chan bool)
+	go func() {
+		t.Helper()
+		b = get(t, p)
+		done <- true
+	}()
+	time.Sleep(time.Millisecond)
+	require.Equal(t, s(State{InPool: 0, InUse: 10, Waiters: 1}), p.State())
+
+	p.Put(a)
+	<-done
+	time.Sleep(time.Millisecond)
+	require.NotZero(t, p.State().WaitTime)
+	wt := p.State().WaitTime
+	require.Equal(t, s(State{InPool: 0, InUse: 10, Waiters: 0, WaitCount: 1, WaitTime: wt}), p.State())
+
+	p.Put(b)
+	time.Sleep(time.Millisecond)
+	require.Equal(t, s(State{InPool: 1, InUse: 9, Waiters: 0, WaitCount: 1, WaitTime: wt}), p.State())
+
+	// Clean up
+	for _, r := range resources {
+		p.Put(r)
+	}
+
+	p.Close()
+}
+
+func TestSuperFull2(t *testing.T) {
+	ctx := context.Background()
+	lastID.Set(0)
+	count.Set(0)
+	p := NewSuperPool(PoolFactory, 6, 6, time.Second, 0)
+
+	err := p.SetCapacity(5, true)
+	require.NoError(t, err)
+	var resources [10]Resource
+
+	for i := 0; i < 5; i++ {
+		r, err := p.Get(ctx)
+		time.Sleep(time.Millisecond)
+		resources[i] = r
+		if err != nil {
+			t.Errorf("Unexpected error %v", err)
+		}
+		if p.Available() != 5-i-1 {
+			t.Errorf("expecting %d, received %d", 5-i-1, p.Available())
+			return
+		}
+		if p.WaitCount() != 0 {
+			t.Errorf("expecting 0, received %d", p.WaitCount())
+			return
+		}
+		if p.WaitTime() != 0 {
+			t.Errorf("expecting 0, received %d", p.WaitTime())
+		}
+		if lastID.Get() != int64(i+1) {
+			t.Errorf("Expecting %d, received %d", i+1, lastID.Get())
+		}
+		if count.Get() != int64(i+1) {
+			t.Errorf("Expecting %d, received %d", i+1, count.Get())
+		}
+	}
+
+	ch := make(chan bool)
+	go func() {
+		for i := 0; i < 5; i++ {
+			r, err := p.Get(ctx)
+			if err != nil {
+				t.Errorf("Get failed: %v", err)
+				panic("exit")
+			}
+			resources[i] = r
+		}
+		for i := 0; i < 5; i++ {
+			p.Put(resources[i])
+		}
+		ch <- true
+	}()
+	for i := 0; i < 5; i++ {
+		// Sleep to ensure the goroutine waits
+		time.Sleep(10 * time.Millisecond)
+		p.Put(resources[i])
+	}
+	<-ch
+	if p.WaitCount() != 5 {
+		t.Errorf("Expecting 5, received %d", p.WaitCount())
+	}
+	if p.WaitTime() == 0 {
+		t.Errorf("Expecting non-zero")
+	}
+	if lastID.Get() != 5 {
+		t.Errorf("Expecting 5, received %d", lastID.Get())
+	}
+
+	// TestSuper Close resource
+	r, err := p.Get(ctx)
+	if err != nil {
+		t.Errorf("Unexpected error %v", err)
+	}
+	r.Close()
+
+	p.Put(nil)
+	if count.Get() != 4 {
+		t.Errorf("Expecting 4, received %d", count.Get())
+	}
+	for i := 0; i < 5; i++ {
+		r, err := p.Get(ctx)
+		if err != nil {
+			t.Errorf("Get failed: %v", err)
+		}
+		resources[i] = r
+	}
+	for i := 0; i < 5; i++ {
+		p.Put(resources[i])
+	}
+	if count.Get() != 5 {
+		t.Errorf("Expecting 5, received %d", count.Get())
+	}
+	if lastID.Get() != 6 {
+		t.Errorf("Expecting 6, received %d", lastID.Get())
+	}
+	// SetCapacity
+	require.NoError(t, p.SetCapacity(3, true))
+	time.Sleep(time.Millisecond)
+	if count.Get() != 3 {
+		t.Errorf("Expecting 3, received %d", count.Get())
+		return
+	}
+	if lastID.Get() != 6 {
+		t.Errorf("Expecting 6, received %d", lastID.Get())
+	}
+	if p.Capacity() != 3 {
+		t.Errorf("Expecting 3, received %d", p.Capacity())
+	}
+	if p.Available() != 3 {
+		t.Errorf("Expecting 3, received %d", p.Available())
+	}
+	require.NoError(t, p.SetCapacity(6, true))
+	time.Sleep(time.Millisecond)
+	if p.Capacity() != 6 {
+		t.Errorf("Expecting 6, received %d", p.Capacity())
+	}
+	if p.Available() != 6 {
+		t.Errorf("Expecting 6, received %d", p.Available())
+	}
+	for i := 0; i < 6; i++ {
+		r, err := p.Get(ctx)
+		if err != nil {
+			t.Errorf("Get failed: %v", err)
+		}
+		resources[i] = r
+	}
+	for i := 0; i < 6; i++ {
+		p.Put(resources[i])
+	}
+	if count.Get() != 6 {
+		t.Errorf("Expecting 5, received %d", count.Get())
+	}
+	if lastID.Get() != 9 {
+		t.Errorf("Expecting 9, received %d", lastID.Get())
+	}
+
+	p.Close()
+	if p.Capacity() != 0 {
+		t.Errorf("Expecting 0, received %d", p.Capacity())
+	}
+	if p.Available() != 0 {
+		t.Errorf("Expecting 0, received %d", p.Available())
+	}
+	if count.Get() != 0 {
+		t.Errorf("Expecting 0, received %d", count.Get())
+	}
+}
+
+func TestSuperShrinking(t *testing.T) {
+	ctx := context.Background()
+	lastID.Set(0)
+	count.Set(0)
+	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 0)
+
+	var resources [10]Resource
+	// Leave one empty slot in the pool
+	for i := 0; i < 4; i++ {
+		resources[i] = get(t, p)
+	}
+
+	done := make(chan bool)
+	go func() {
+		t.Helper()
+		require.NoError(t, p.SetCapacity(3, true))
+		done <- true
+	}()
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 3, InUse: 4, IdleTimeout: time.Second, Draining: true}, p.State())
+	require.Equal(t, 0, p.Available())
+	require.Equal(t, 4, p.Active())
+
+	// There are already 2 resources available in the pool.
+	// So, returning one should be enough for SetCapacity to complete.
+	p.Put(resources[3])
+	<-done
+	time.Sleep(time.Millisecond * 10)
+
+	// Return the rest of the resources
+	for i := 0; i < 3; i++ {
+		p.Put(resources[i])
+	}
+	time.Sleep(time.Millisecond * 10)
+
+	require.Equal(t, State{Capacity: 3, InPool: 3, IdleTimeout: time.Second}, p.State())
+	require.Equal(t, 3, p.Available())
+	require.Equal(t, 3, p.Active())
+	require.Equal(t, 3, int(count.Get()))
+
+	// Ensure no deadlock if SetCapacity is called after we start
+	// waiting for a resource
+	var err error
+	for i := 0; i < 3; i++ {
+		resources[i] = get(t, p)
+	}
+	// This will wait because pool is empty
+	go func() {
+		r := get(t, p)
+		p.Put(r)
+		done <- true
+	}()
+
+	// This will also wait
+	go func() {
+		p.SetCapacity(2, true)
+		done <- true
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	// This should not hang
+	for i := 0; i < 3; i++ {
+		p.Put(resources[i])
+	}
+	<-done
+	<-done
+	time.Sleep(time.Millisecond)
+
+	if p.Capacity() != 2 {
+		t.Errorf("Expecting 2, received %d", p.Capacity())
+	}
+	if p.Available() != 2 {
+		t.Errorf("Expecting 2, received %d", p.Available())
+	}
+	if p.WaitCount() != 1 {
+		t.Errorf("Expecting 1, received %d", p.WaitCount())
+		return
+	}
+	if count.Get() != 2 {
+		t.Errorf("Expecting 2, received %d", count.Get())
+	}
+
+	// TestSuper race condition of SetCapacity with itself
+	p.SetCapacity(3, true)
+	for i := 0; i < 3; i++ {
+		resources[i], err = p.Get(ctx)
+		if err != nil {
+			t.Errorf("Unexpected error %v", err)
+		}
+	}
+	// This will wait because pool is empty
+	go func() {
+		r, err := p.Get(ctx)
+		if err != nil {
+			t.Errorf("Unexpected error %v", err)
+		}
+		p.Put(r)
+		done <- true
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	// This will wait till we Put
+	go p.SetCapacity(2, true)
+	time.Sleep(10 * time.Millisecond)
+	go p.SetCapacity(4, true)
+	time.Sleep(10 * time.Millisecond)
+
+	// This should not hang
+	for i := 0; i < 3; i++ {
+		p.Put(resources[i])
+	}
+	<-done
+
+	require.Error(t, p.SetCapacity(-1, true))
+	time.Sleep(time.Millisecond)
+	require.Equal(t, p.Capacity(), 4)
+	require.Equal(t, p.Available(), 4)
+
+	p.Close()
+}
 
 func TestSuperClosing(t *testing.T) {
 	ctx := context.Background()
@@ -609,8 +621,6 @@ func TestSuperIdleTimeout(t *testing.T) {
 	require.Equal(t, 1, int(p.IdleClosed()))
 	require.Equal(t, 1, int(p.InUse()))
 
-	fmt.Println("OK????")
-
 	p.Put(r)
 	time.Sleep(time.Millisecond)
 	r = get(t, p)
@@ -689,12 +699,6 @@ func TestSuperTimeoutSlow(t *testing.T) {
 		resources = append(resources, get(t, p))
 	}
 
-	fmt.Println("------------")
-	fmt.Println("------------")
-	fmt.Println("------------")
-	fmt.Println("------------")
-	fmt.Println("------------")
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(time.Millisecond*5))
 	r, err := p.Get(ctx)
 	require.EqualError(t, err, "resource pool timed out")
@@ -720,20 +724,18 @@ func TestSuperTimeoutPoolFull(t *testing.T) {
 	expected := State{Capacity: 1, InUse: 1, IdleTimeout: time.Second}
 	require.Equal(t, expected, p.State())
 
-	shortCtx, cancel := context.WithTimeout(ctx, time.Millisecond*50)
-	a, err := p.Get(shortCtx)
-	cancel()
+	shortCtx, _ := context.WithTimeout(ctx, time.Millisecond*50)
+	_, err := p.Get(shortCtx)
 	require.EqualError(t, err, "resource pool timed out")
 
 	time.Sleep(time.Millisecond * 10)
 	require.Equal(t, expected, p.State())
 
 	p.Put(b)
+	time.Sleep(time.Millisecond)
 	expected.InUse = 0
 	expected.InPool = 1
 	require.Equal(t, expected, p.State())
-
-	p.Put(a)
 
 	p.Close()
 }
@@ -803,6 +805,7 @@ func TestSuperMinActiveWithExpiry(t *testing.T) {
 		}
 		resources = append(resources, r)
 	}
+	time.Sleep(time.Millisecond)
 
 	// Should have only ever allocated 4 (3 min, 1 extra).
 	expected.InUse = 4
@@ -829,6 +832,7 @@ func TestSuperMinActiveWithExpiry(t *testing.T) {
 
 func TestSuperMinActiveSelfRefreshing(t *testing.T) {
 	p := NewSuperPool(PoolFactory, 5, 5, time.Second, 3)
+	time.Sleep(time.Millisecond)
 
 	// Get 5
 	var resources []Resource
@@ -858,17 +862,13 @@ func TestSuperMinActiveTooHigh(t *testing.T) {
 	NewSuperPool(FailFactory, 1, 1, time.Second, 2)
 }
 
-func TestSuperTooManyGetsAtOnce(t *testing.T) {
-	panic("TODO")
-}
-
 func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {
 	p := NewSuperPool(PoolFactory, 100, 100, time.Millisecond, 0)
 
 	done := make(chan bool)
 	go func() {
 		var rs []Resource
-		for total := 0; total < 5000; total += 10 {
+		for total := 0; total < 1000; total += 20 {
 			rs = nil
 			for i := 0; i < 100; i++ {
 				time.Sleep(time.Duration(total))
@@ -890,7 +890,6 @@ func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {
 	}()
 	<-done
 
-	t.Log(p.StatsJSON())
 	require.NotZero(t, p.State().IdleClosed)
 
 	p.Close()
@@ -899,9 +898,7 @@ func TestSuperCloseIdleResourcesInPoolChangingRaceAttempt(t *testing.T) {
 func TestSuperMinActiveTooHighAfterSetCapacity(t *testing.T) {
 	p := NewSuperPool(FailFactory, 3, 3, time.Second, 2)
 
-	if err := p.SetCapacity(2, true); err != nil {
-		t.Errorf("Expecting no error, instead got: %v", err)
-	}
+	require.NoError(t, p.SetCapacity(2, true))
 
 	err := p.SetCapacity(1, true)
 	expecting := "minActive 2 would now be higher than capacity 1"
@@ -939,36 +936,3 @@ func TestSuperGetPutRace(t *testing.T) {
 	p.Close()
 }
 
-func TestSuperPanicStringCreateFactory(t *testing.T) {
-	p := NewSuperPool(PanicStringCreateFactory, 10, 10, 0, 0)
-	require.Panics(t, func() {
-		_, _ = p.Get(context.Background())
-	})
-	p.Close()
-}
-
-func TestSuperPanicErrorCreateFactory(t *testing.T) {
-	p := NewSuperPool(PanicErrorCreateFactory, 10, 10, 0, 0)
-	require.Panics(t, func() {
-		_, _ = p.Get(context.Background())
-	})
-	p.Close()
-}
-
-func TestSuperPanicStringCloseFactory(t *testing.T) {
-	p := NewSuperPool(PanicStringCloseFactory, 10, 10, 0, 0)
-	r := get(t, p)
-	p.Put(r)
-	require.Panics(t, func() {
-		p.Close()
-	})
-}
-
-func TestSuperPanicErrorCloseFactory(t *testing.T) {
-	p := NewSuperPool(PanicErrorCloseFactory, 10, 10, 0, 0)
-	r := get(t, p)
-	p.Put(r)
-	require.Panics(t, func() {
-		p.Close()
-	})
-}

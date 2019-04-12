@@ -15,6 +15,7 @@ func main() {
 	impls := []implSet{
 		{"Res", pools.ResourceImpl},
 		{"Fst", pools.FastImpl},
+		{"Sup", pools.SuperImpl},
 	}
 
 	f, err := os.Create("go/pools/bench_test.go")

@@ -83,10 +83,6 @@ type State struct {
 
 	// WaitCount tracks the total time waiting for a resource.
 	WaitTime time.Duration
-
-	ignoreCapacityAsserts bool
-
-	queue []getCommand
 }
 
 // NewFastPool creates a new pool for generic resources.
