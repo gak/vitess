@@ -183,7 +183,7 @@ func (p *SuperPool) handleCancelled(state *State) {
 			select {
 			case <-get.ctx.Done():
 				state.Waiters--
-				get.callback <- resourceError(ErrTimeout)
+				get.callback <- errResource(ErrTimeout)
 			default:
 				p.queue[idx] = get
 				idx++
@@ -236,7 +236,7 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 	default:
 		state.Spawning--
 		state.Waiters--
-		cmd.callback <- resourceError(ErrOpenBufferFull)
+		cmd.callback <- errResource(ErrOpenBufferFull)
 	}
 }
 
@@ -302,14 +302,14 @@ func (cmd setCapCmd) execute(p *SuperPool, state *State) {
 
 	if cmd.size < 0 {
 		if cmd.wait != nil {
-			cmd.wait <- strErr("capacity %d is out of range", cmd.size)
+			cmd.wait <- errStr("capacity %d is out of range", cmd.size)
 		}
 		return
 	}
 
 	if cmd.size > 0 && state.MinActive > cmd.size {
 		if cmd.wait != nil {
-			cmd.wait <- strErr("minActive %v would now be higher than capacity %v", state.MinActive, cmd.size)
+			cmd.wait <- errStr("minActive %v would now be higher than capacity %v", state.MinActive, cmd.size)
 		}
 		return
 	}
@@ -321,27 +321,26 @@ func (cmd setCapCmd) execute(p *SuperPool, state *State) {
 		state.Closed = true
 	}
 
-	if toDrain > 0 {
-		var drain []resourceWrapper
-		p.newCapWait = cmd.wait
-		state.Draining = true
-		if state.InPool < toDrain {
-			drain, p.pool = p.pool, []resourceWrapper{}
-			toDrain -= state.InPool
-		} else {
-			drain, p.pool = p.pool[:toDrain], p.pool[toDrain:]
-		}
-		state.InPool -= len(drain)
-		state.Closing += len(drain)
-		for _, w := range drain {
-			p.close <- closeReq{
-				wrapper: w,
-			}
-		}
-	} else {
+	if toDrain <= 0 {
 		if cmd.wait != nil {
 			cmd.wait <- nil
 		}
+		return
+	}
+
+	var drain []resourceWrapper
+	p.newCapWait = cmd.wait
+	state.Draining = true
+	if state.InPool < toDrain {
+		drain, p.pool = p.pool, []resourceWrapper{}
+		toDrain -= state.InPool
+	} else {
+		drain, p.pool = p.pool[:toDrain], p.pool[toDrain:]
+	}
+	state.InPool -= len(drain)
+	state.Closing += len(drain)
+	for _, w := range drain {
+		p.close <- closeReq{wrapper: w}
 	}
 }
 
@@ -368,10 +367,11 @@ type didOpenCmd struct {
 
 func (cmd didOpenCmd) execute(p *SuperPool, state *State) {
 	state.Spawning--
+	if cmd.request.reason == forUse {
+		state.Waiters--
+	}
+
 	if cmd.resource.err != nil {
-		if cmd.request.reason == forUse {
-			state.Waiters--
-		}
 		if cmd.request.callback != nil {
 			cmd.request.callback <- cmd.resource
 		}
@@ -384,7 +384,6 @@ func (cmd didOpenCmd) execute(p *SuperPool, state *State) {
 		p.pool = append(p.pool, cmd.resource)
 	case forUse:
 		state.InUse++
-		state.Waiters--
 
 		if !cmd.request.when.IsZero() {
 			state.WaitCount++
@@ -460,7 +459,7 @@ func (p *SuperPool) opener() {
 				}
 
 				if err != nil {
-					doc.resource = resourceError(err)
+					doc.resource = errResource(err)
 				} else {
 					doc.resource = resourceWrapper{
 						resource: r,
@@ -475,7 +474,7 @@ func (p *SuperPool) opener() {
 					goto WaitForResource
 				}
 				aborted = true
-				doc.resource = resourceError(ErrTimeout)
+				doc.resource = errResource(ErrTimeout)
 				p.cmd <- doc
 
 				goto WaitForResource
@@ -633,10 +632,10 @@ func errWrap(err error) error {
 	return vterrors.NewWithoutCode(err.Error())
 }
 
-func strErr(f string, s ...interface{}) error {
+func errStr(f string, s ...interface{}) error {
 	return vterrors.NewWithoutCode(fmt.Sprintf(f, s...))
 }
 
-func resourceError(err error) resourceWrapper {
+func errResource(err error) resourceWrapper {
 	return resourceWrapper{err: errWrap(err)}
 }
