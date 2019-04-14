@@ -69,8 +69,8 @@ func NewSuperPool(opts Opts) *SuperPool {
 
 	p := &SuperPool{
 		factory:       opts.Factory,
-		cmd:           make(chan command, 1),
-		open:          make(chan openReq, opts.Capacity),
+		cmd:           make(chan command),
+		open:          make(chan openReq, opts.Capacity*2),
 		close:         make(chan closeReq, opts.Capacity),
 		finishWorkers: make(chan bool),
 		finishMain:    make(chan bool),
@@ -164,33 +164,37 @@ func (p *SuperPool) checkForWaiters(state *State) {
 }
 
 func (p *SuperPool) createMinActive(state *State) {
-	if !state.Draining {
-		toSpawn := p.MinActive() - state.InPool - state.InUse - state.Spawning
-		for i := 0; i < toSpawn; i++ {
-			select {
-			case p.open <- openReq{reason: forPool}:
-				state.Spawning++
-			default:
-			}
+	if state.Draining {
+		return
+	}
+
+	toSpawn := p.MinActive() - state.InPool - state.InUse - state.Spawning
+	for i := 0; i < toSpawn; i++ {
+		select {
+		case p.open <- openReq{reason: forPool}:
+			state.Spawning++
+		default:
 		}
 	}
 }
 
 func (p *SuperPool) handleCancelled(state *State) {
-	if len(p.queue) > 0 {
-		idx := 0
-		for _, get := range p.queue {
-			select {
-			case <-get.ctx.Done():
-				state.Waiters--
-				get.callback <- errResource(ErrTimeout)
-			default:
-				p.queue[idx] = get
-				idx++
-			}
-		}
-		p.queue = p.queue[:idx]
+	if len(p.queue) == 0 {
+		return
 	}
+
+	idx := 0
+	for _, get := range p.queue {
+		select {
+		case <-get.ctx.Done():
+			state.Waiters--
+			get.callback <- errResource(ErrTimeout)
+		default:
+			p.queue[idx] = get
+			idx++
+		}
+	}
+	p.queue = p.queue[:idx]
 }
 
 type command interface {
@@ -399,7 +403,9 @@ type closeReq struct {
 	wrapper resourceWrapper
 }
 
-type didClose struct{}
+type didClose struct {
+	err error
+}
 
 func (cmd didClose) execute(p *SuperPool, state *State) {
 	state.Closing--
@@ -410,7 +416,7 @@ func (cmd didClose) execute(p *SuperPool, state *State) {
 			state.Closed = true
 		}
 		if p.newCapWait != nil {
-			p.newCapWait <- nil
+			p.newCapWait <- cmd.err
 			p.newCapWait = nil
 		}
 		return
@@ -447,8 +453,13 @@ func (p *SuperPool) opener() {
 			var r Resource
 			var err error
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err = vterrors.NewWithoutCode(fmt.Sprintf("resource creation panicked: %v", r))
+					}
+					done <- true
+				}()
 				r, err = p.factory()
-				done <- true
 			}()
 
 		WaitForResource:
@@ -490,10 +501,21 @@ func (p *SuperPool) closer() {
 			return
 
 		case req := <-p.close:
-			req.wrapper.resource.Close()
-			p.cmd <- didClose{}
+			err := p.closeResource(req)
+			p.cmd <- didClose{err: err}
 		}
 	}
+}
+
+func (p *SuperPool) closeResource(req closeReq) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = vterrors.NewWithoutCode(fmt.Sprintf("resource closing panicked: %v", r))
+		}
+	}()
+
+	req.wrapper.resource.Close()
+	return
 }
 
 func (p *SuperPool) Close() {

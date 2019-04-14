@@ -934,3 +934,56 @@ func TestSuperGetPutRace(t *testing.T) {
 
 	p.Close()
 }
+
+func TestSuperCloseTwicePanic(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
+	p.Close()
+	require.Panics(t, func() {
+		p.Close()
+	})
+}
+
+func TestSuperSetCapacityWhileClosed(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
+	p.Close()
+	require.Error(t, p.SetCapacity(5, true))
+	require.Error(t, p.SetCapacity(5, false))
+}
+
+func TestSuperOpenBufferTooFull(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 2, OpenWorkers: 1, CloseWorkers: 1})
+	p.open <- openReq{}
+	p.Get(context.Background())
+}
+
+func TestSuperPanicStringCreateFactory(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PanicStringCreateFactory, Capacity: 10, OpenWorkers: 1, CloseWorkers: 1})
+	_, err := p.Get(context.Background())
+	require.EqualError(t, err, "resource creation panicked: resource")
+	p.Close()
+}
+
+func TestSuperPanicErrorCreateFactory(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PanicErrorCreateFactory, Capacity: 10, OpenWorkers: 1, CloseWorkers: 1})
+	_, err := p.Get(context.Background())
+	require.Error(t, err)
+	p.Close()
+}
+
+func TestSuperPanicStringCloseFactory(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PanicStringCloseFactory, Capacity: 10, OpenWorkers: 1, CloseWorkers: 1})
+	r := get(t, p)
+	p.Put(r)
+	require.Panics(t, func() {
+		p.Close()
+	})
+}
+
+func TestSuperPanicErrorCloseFactory(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PanicErrorCloseFactory, Capacity: 10, OpenWorkers: 1, CloseWorkers: 1})
+	r := get(t, p)
+	p.Put(r)
+	require.Panics(t, func() {
+		p.Close()
+	})
+}
