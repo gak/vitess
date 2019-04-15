@@ -17,6 +17,7 @@ type Opts struct {
 	MinActive    int
 	OpenWorkers  int
 	CloseWorkers int
+	MaxOpenQueue int
 	IdleTimeout  time.Duration
 }
 
@@ -29,9 +30,8 @@ type SuperPool struct {
 
 	// finishMain used to close the main goroutine.
 	finishMain chan bool
-
-	// finishWorkers is used to close all workers.
-	finishWorkers chan bool
+	finishOpenWorkers  chan bool
+	finishCloseWorkers chan bool
 
 	// Opener
 	open chan openReq
@@ -39,14 +39,13 @@ type SuperPool struct {
 	// Closer
 	close chan closeReq
 
-	// The number of workers that need to exit when closing.
-	workers int
-
 	newCapWait chan error
 
 	idleChan <-chan time.Time
 
-	state atomic.Value
+	state        atomic.Value
+	openWorkers  int
+	closeWorkers int
 }
 
 // NewSuperPool
@@ -66,14 +65,20 @@ func NewSuperPool(opts Opts) *SuperPool {
 	if opts.CloseWorkers == 0 {
 		panic("close workers required to be set")
 	}
+	if opts.MaxOpenQueue == 0 {
+		opts.MaxOpenQueue = opts.Capacity * 2
+	}
 
 	p := &SuperPool{
-		factory:       opts.Factory,
-		cmd:           make(chan command),
-		open:          make(chan openReq, opts.Capacity*2),
-		close:         make(chan closeReq, opts.Capacity),
-		finishWorkers: make(chan bool),
-		finishMain:    make(chan bool),
+		factory:            opts.Factory,
+		cmd:                make(chan command),
+		open:               make(chan openReq, opts.MaxOpenQueue),
+		close:              make(chan closeReq, opts.Capacity),
+		finishOpenWorkers:  make(chan bool),
+		finishCloseWorkers: make(chan bool),
+		finishMain:         make(chan bool),
+		openWorkers:        opts.OpenWorkers,
+		closeWorkers:       opts.CloseWorkers,
 	}
 
 	state := State{
@@ -83,14 +88,12 @@ func NewSuperPool(opts Opts) *SuperPool {
 	}
 	p.state.Store(state)
 
-	p.workers = opts.OpenWorkers + opts.CloseWorkers
-
 	go p.main(state)
 
-	for i := 0; i < opts.OpenWorkers; i++ {
+	for i := 0; i < p.openWorkers; i++ {
 		go p.opener()
 	}
-	for i := 0; i < opts.CloseWorkers; i++ {
+	for i := 0; i < p.closeWorkers; i++ {
 		go p.closer()
 	}
 
@@ -128,18 +131,15 @@ func (p *SuperPool) main(state State) {
 			cmd.execute(p, &state)
 
 		case <-p.idleChan:
-			//fmt.Println("Timer")
 			idx := 0
 			for _, w := range p.pool {
 				deadline := w.timeUsed.Add(state.IdleTimeout)
-				//fmt.Println("Time check", deadline.Sub(time.Now()))
 				if time.Now().Before(deadline) {
 					p.pool[idx] = w
 					idx++
 					continue
 				}
 
-				//fmt.Println("Timeout on resource...")
 				state.InPool--
 				state.Closing++
 				state.IdleClosed++
@@ -158,7 +158,6 @@ func (p *SuperPool) checkForWaiters(state *State) {
 		var get getCmd
 		get, p.queue = p.queue[0], p.queue[1:]
 		state.Waiters--
-		//fmt.Println("There is a queue! Spawning...", get.when)
 		get.execute(p, state)
 	}
 }
@@ -225,6 +224,7 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 		state.Waiters++
 		cmd.when = time.Now()
 		p.queue = append(p.queue, cmd)
+		//p.cmd <- newWaiter{}
 		return
 	}
 
@@ -434,7 +434,7 @@ func (cmd testingOnlyReplaceState) execute(p *SuperPool, state *State) {
 func (p *SuperPool) opener() {
 	for {
 		select {
-		case <-p.finishWorkers:
+		case <-p.finishOpenWorkers:
 			return
 
 		case requester := <-p.open:
@@ -497,7 +497,7 @@ func (p *SuperPool) opener() {
 func (p *SuperPool) closer() {
 	for {
 		select {
-		case <-p.finishWorkers:
+		case <-p.finishCloseWorkers:
 			return
 
 		case req := <-p.close:
@@ -525,8 +525,11 @@ func (p *SuperPool) Close() {
 		panic(err)
 	}
 
-	for i := 0; i < p.workers; i++ {
-		p.finishWorkers <- true
+	for i := 0; i < p.openWorkers; i++ {
+		p.finishOpenWorkers <- true
+	}
+	for i := 0; i < p.closeWorkers; i++ {
+		p.finishCloseWorkers <- true
 	}
 	p.finishMain <- true
 

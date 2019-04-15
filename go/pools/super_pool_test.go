@@ -987,3 +987,53 @@ func TestSuperPanicErrorCloseFactory(t *testing.T) {
 		p.Close()
 	})
 }
+
+func TestSuperFullOpenQueue(t *testing.T) {
+	capacity := 1000
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: capacity, OpenWorkers: 10, CloseWorkers: 1, MaxOpenQueue: 1})
+
+	jobs := make(chan bool, capacity)
+	for i := 0; i < capacity; i++ {
+		jobs <- true
+	}
+
+	type ret struct {
+		r   Resource
+		err error
+	}
+
+	done := make(chan ret)
+	for i := 0; i < 100; i++ {
+		go func() {
+			for range jobs {
+				r, err := p.Get(context.Background())
+				if err != nil {
+					done <- ret{err: err}
+				} else {
+					done <- ret{r: r}
+				}
+			}
+		}()
+	}
+
+	var rs []Resource
+	didErr := false
+	for i := 0; i < capacity; i++ {
+		result := <-done
+		if result.err != nil {
+			didErr = true
+			require.EqualError(t, result.err, ErrOpenBufferFull.Error())
+		} else {
+			rs = append(rs, result.r)
+		}
+	}
+	require.True(t, didErr)
+	close(jobs)
+
+	for _, r := range rs {
+		p.Put(r)
+	}
+	time.Sleep(time.Millisecond * 100)
+	require.Equal(t, State{Capacity: capacity, InPool: len(rs)}, p.State())
+	p.Close()
+}
