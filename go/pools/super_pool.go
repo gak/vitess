@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync/atomic"
 	"time"
 	"vitess.io/vitess/go/vt/vterrors"
@@ -118,18 +119,18 @@ func (p *SuperPool) main(state State) {
 	p.updateIdleTimer(&state)
 
 	for {
-		//fmt.Printf("\n--- %+v\n\n", state)
 		p.checkForWaiters(&state)
-		//p.handleCancelled(&state)
 		p.createMinActive(&state)
 		p.state.Store(state)
 
 		select {
 		case <-p.finishMain:
+			p.abortAllWaiters(&state)
 			return
 
 		case cmd := <-p.cmd:
-			//fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
+			fmt.Printf("\n--- %+v\n\n", state)
+			fmt.Printf("CMD %s\n", reflect.TypeOf(cmd))
 			cmd.execute(p, &state)
 
 		case <-p.idleChan:
@@ -161,35 +162,6 @@ func (p *SuperPool) main(state State) {
 	}
 }
 
-//func (p *SuperPool) cancelled() <-chan getCmd {
-//	c := make(chan getCmd)
-//	for _, get := range p.queue {
-//		go func() {
-//
-//		}()
-//	}
-//	return c
-//}
-
-func (p *SuperPool) handleCancelled(state *State) {
-	if len(p.queue) == 0 {
-		return
-	}
-
-	idx := 0
-	for _, get := range p.queue {
-		select {
-		case <-get.ctx.Done():
-			state.Waiters--
-			get.callback <- errResource(ErrTimeout)
-		default:
-			p.queue[idx] = get
-			idx++
-		}
-	}
-	p.queue = p.queue[:idx]
-}
-
 func (p *SuperPool) checkForWaiters(state *State) {
 	for len(p.queue) > 0 && (state.activeTransient() < state.Capacity || state.InPool > 0) {
 		var get getCmd
@@ -197,6 +169,14 @@ func (p *SuperPool) checkForWaiters(state *State) {
 		state.Waiters--
 		get.execute(p, state)
 	}
+}
+
+func (p *SuperPool) abortAllWaiters(state *State) {
+	for _, get := range p.queue {
+		state.Waiters--
+		get.callback <- errResource(errStr("the pool is closing"))
+	}
+	p.queue = nil
 }
 
 func (p *SuperPool) createMinActive(state *State) {
@@ -218,9 +198,29 @@ type command interface {
 	execute(p *SuperPool, state *State)
 }
 
+type didCancelCmd struct {
+	get getCmd
+}
+
+func (cmd didCancelCmd) execute(p *SuperPool, state *State) {
+	fmt.Println("got a didCancel command")
+	idx := 0
+	for _, waiter := range p.queue {
+		// callback is unique per get request becaus a new channel is made every time.
+		if waiter.callback != cmd.get.callback {
+			p.queue[idx] = waiter
+			idx++
+			continue
+		}
+
+		state.Waiters--
+		waiter.callback <- errResource(errStr("your context was queued and cancelled"))
+	}
+	p.queue = p.queue[:idx]
+}
+
 type getCmd struct {
 	callback chan resourceWrapper
-	ctx      context.Context
 	removed  chan bool
 	when     time.Time
 }
@@ -235,10 +235,7 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 			state.WaitCount++
 			state.WaitTime += time.Now().Sub(cmd.when)
 		}
-		select {
-		case <-cmd.ctx.Done():
-		case cmd.callback <- r:
-		}
+		cmd.callback <- r
 		return
 	}
 
@@ -246,13 +243,6 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 		state.Waiters++
 		cmd.when = time.Now()
 		p.queue = append(p.queue, cmd)
-		//go func() {
-		//	select {
-		//	case <-cmd.ctx.Done():
-		//		p.cancelled <- cmd
-		//	case <-cmd.removed:
-		//	}
-		//}()
 		return
 	}
 
@@ -262,7 +252,6 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 	case p.open <- openReq{
 		reason:   forUse,
 		callback: cmd.callback,
-		ctx:      cmd.ctx,
 		when:     cmd.when,
 	}:
 	default:
@@ -389,7 +378,6 @@ func (cmd setTimeoutCmd) execute(p *SuperPool, state *State) {
 type openReq struct {
 	callback chan resourceWrapper
 	reason   createType
-	ctx      context.Context
 	when     time.Time
 }
 
@@ -467,20 +455,9 @@ func (p *SuperPool) opener() {
 			return
 
 		case requester := <-p.open:
-			aborted := false;
-			done := make(chan bool)
-			doc := didOpenCmd{
-				request: requester,
-			}
-
-			maybeCtx := requester.ctx
-			var cancelChan <-chan struct{}
-			if maybeCtx != nil {
-				cancelChan = maybeCtx.Done()
-			}
-
 			var r Resource
 			var err error
+			done := make(chan bool)
 			go func() {
 				defer func() {
 					if r := recover(); r != nil {
@@ -490,35 +467,20 @@ func (p *SuperPool) opener() {
 				}()
 				r, err = p.factory()
 			}()
+			<-done
 
-		WaitForResource:
-			select {
-			case <-done:
-				if aborted {
-					break
-				}
-
-				if err != nil {
-					doc.resource = errResource(err)
-				} else {
-					doc.resource = resourceWrapper{
-						resource: r,
-						timeUsed: time.Now(),
-					}
-				}
-				p.cmd <- doc
-
-			case <-cancelChan:
-				if aborted {
-					// Caller has cancelled again. We ignore these.
-					goto WaitForResource
-				}
-				aborted = true
-				doc.resource = errResource(ErrTimeout)
-				p.cmd <- doc
-
-				goto WaitForResource
+			doc := didOpenCmd{
+				request: requester,
 			}
+			if err != nil {
+				doc.resource = errResource(err)
+			} else {
+				doc.resource = resourceWrapper{
+					resource: r,
+					timeUsed: time.Now(),
+				}
+			}
+			p.cmd <- doc
 		}
 	}
 }
@@ -564,7 +526,6 @@ func (p *SuperPool) Close() {
 
 	close(p.open)
 	close(p.close)
-	close(p.cmd)
 }
 
 func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
@@ -573,25 +534,24 @@ func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 	}
 
 	callback := make(chan resourceWrapper, 1)
-		p.cmd <- getCmd{
-			callback: callback,
-			ctx:      ctx,
+	cmd := getCmd{callback: callback}
+	p.cmd <- cmd
+	select {
+	case w := <-callback:
+		if w.err != nil {
+			return nil, w.err
 		}
-		select {
-			case w := <-callback
-
-			if w.err != nil {
-				return nil, w.err
+		return w.resource, nil
+	case <-ctx.Done():
+		go func() {
+			p.cmd <- didCancelCmd{get: cmd}
+			w := <-callback
+			if w.err == nil {
+				p.Put(w.resource)
 			}
-			return w.resource, nil
-			case ctx.Done():
-				go func() {
-					case w := <-callback {
-						p.put(w)
-					}
-				}()
-
-		}
+		}()
+		return nil, ErrTimeout
+	}
 }
 
 func (p *SuperPool) Put(r Resource) {
@@ -703,3 +663,4 @@ func errStr(f string, s ...interface{}) error {
 func errResource(err error) resourceWrapper {
 	return resourceWrapper{err: errWrap(err)}
 }
+

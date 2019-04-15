@@ -533,24 +533,41 @@ func TestSuperShrinking(t *testing.T) {
 func TestSuperTimeoutRace(t *testing.T) {
 	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
 
+	f := get(t, p)
+
 	ctx, _ := context.WithTimeout(context.Background(), time.Millisecond*100)
 
-	done := make(chan bool)
+	doneA := make(chan bool)
 	var errA error
 	go func() {
 		_, errA = p.Get(ctx)
-		done <- true
+		doneA <- true
 	}()
 	time.Sleep(time.Millisecond)
 
-	ctx2, _ := context.WithTimeout(context.Background(), time.Millisecond*50)
-	_, errB := p.Get(ctx2)
+	ctxB, _ := context.WithTimeout(context.Background(), time.Millisecond*50)
+	doneB := make(chan bool)
+	var errB error
+	go func() {
+		_, errB = p.Get(ctxB)
+		doneB <- true
+	}()
 
-	<-done
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1, Waiters: 2}, p.State())
 
-	fmt.Println(errA)
-	fmt.Println(errB)
+	<-doneB
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1, Waiters: 1}, p.State())
 
+	<-doneA
+	time.Sleep(time.Millisecond)
+	require.Equal(t, State{Capacity: 1, InUse: 1}, p.State())
+
+	require.EqualError(t, errA, "resource pool timed out")
+	require.EqualError(t, errB, "resource pool timed ou0")
+
+	p.Put(f)
 
 	p.Close()
 }
@@ -728,9 +745,11 @@ func TestSuperTimeoutSlow(t *testing.T) {
 	require.EqualError(t, err, "resource pool timed out")
 	cancel()
 
-	time.Sleep(time.Millisecond)
+	expected := State{Capacity: 4, InUse: 4, IdleTimeout: time.Second, Waiters: 1}
+	require.Equal(t, expected, p.State())
 
-	expected := State{Capacity: 4, InUse: 4, IdleTimeout: time.Second}
+	time.Sleep(time.Second)
+	expected.Waiters = 0
 	require.Equal(t, expected, p.State())
 
 	for _, r = range resources {
@@ -786,7 +805,7 @@ func TestSuperMinActive(t *testing.T) {
 	lastID.Set(0)
 	count.Set(0)
 	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 5, IdleTimeout: time.Second, MinActive: 3, OpenWorkers: 1, CloseWorkers: 1})
-	time.Sleep(time.Millisecond)
+	time.Sleep(time.Millisecond*10)
 
 	if p.Available() != 5 {
 		t.Errorf("Expecting 5, received %d", p.Available())
