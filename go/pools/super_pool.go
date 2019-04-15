@@ -293,10 +293,11 @@ type setCapCmd struct {
 func (cmd setCapCmd) execute(p *SuperPool, state *State) {
 	// Only allow one running SetCapacity at a time.
 	if p.newCapWait != nil {
-		p.newCapWait <- nil
+		p.newCapWait <- errStr("another SetCapacity has been run: %d", cmd.size)
 		p.newCapWait = nil
 	}
 
+	// Even though this is checked in SetCapacity, we prevent a race condition by checking here.
 	if state.Closed {
 		if cmd.wait != nil {
 			cmd.wait <- errWrap(ErrClosed)

@@ -950,10 +950,27 @@ func TestSuperSetCapacityWhileClosed(t *testing.T) {
 	require.Error(t, p.SetCapacity(5, false))
 }
 
-func TestSuperOpenBufferTooFull(t *testing.T) {
+func TestSuperSetCapacityTwice(t *testing.T) {
 	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 2, OpenWorkers: 1, CloseWorkers: 1})
-	p.open <- openReq{}
-	p.Get(context.Background())
+	a := get(t, p)
+	b := get(t, p)
+	var err error
+	done := make(chan bool)
+	go func() {
+		err = p.SetCapacity(1, true)
+		done <- true
+	}()
+
+	time.Sleep(time.Millisecond)
+	require.NoError(t, p.SetCapacity(10, true))
+
+	<-done
+	require.Error(t, err)
+
+	p.Put(a)
+	p.Put(b)
+
+	p.Close()
 }
 
 func TestSuperPanicStringCreateFactory(t *testing.T) {
