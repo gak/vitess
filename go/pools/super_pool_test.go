@@ -530,6 +530,31 @@ func TestSuperShrinking(t *testing.T) {
 	p.Close()
 }
 
+func TestSuperTimeoutRace(t *testing.T) {
+	p := NewSuperPool(Opts{Factory: PoolFactory, Capacity: 1, OpenWorkers: 1, CloseWorkers: 1})
+
+	ctx, _ := context.WithTimeout(context.Background(), time.Millisecond*100)
+
+	done := make(chan bool)
+	var errA error
+	go func() {
+		_, errA = p.Get(ctx)
+		done <- true
+	}()
+	time.Sleep(time.Millisecond)
+
+	ctx2, _ := context.WithTimeout(context.Background(), time.Millisecond*50)
+	_, errB := p.Get(ctx2)
+
+	<-done
+
+	fmt.Println(errA)
+	fmt.Println(errB)
+
+
+	p.Close()
+}
+
 func TestSuperClosing(t *testing.T) {
 	ctx := context.Background()
 	lastID.Set(0)

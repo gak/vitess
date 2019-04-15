@@ -80,6 +80,9 @@ func New(poolImpl Impl, f CreateFactory, cap, maxCap int, idleTimeout time.Durat
 	if os.Getenv("VT_EXPERIMENTAL_FAST_POOL") != "" {
 		poolImpl = FastImpl
 	}
+	if os.Getenv("VT_EXPERIMENTAL_SUPER_POOL") != "" {
+		poolImpl = SuperImpl
+	}
 
 	switch poolImpl {
 	case ResourceImpl:

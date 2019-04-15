@@ -22,14 +22,15 @@ type Opts struct {
 }
 
 type SuperPool struct {
-	factory CreateFactory
-	started bool
-	pool    []resourceWrapper
-	queue   []getCmd
-	cmd     chan command
+	factory   CreateFactory
+	started   bool
+	pool      []resourceWrapper
+	queue     []getCmd
+	cmd       chan command
+	cancelled chan getCmd
 
 	// finishMain used to close the main goroutine.
-	finishMain chan bool
+	finishMain         chan bool
 	finishOpenWorkers  chan bool
 	finishCloseWorkers chan bool
 
@@ -77,6 +78,7 @@ func NewSuperPool(opts Opts) *SuperPool {
 		finishOpenWorkers:  make(chan bool),
 		finishCloseWorkers: make(chan bool),
 		finishMain:         make(chan bool),
+		cancelled:          make(chan getCmd),
 		openWorkers:        opts.OpenWorkers,
 		closeWorkers:       opts.CloseWorkers,
 	}
@@ -118,7 +120,7 @@ func (p *SuperPool) main(state State) {
 	for {
 		//fmt.Printf("\n--- %+v\n\n", state)
 		p.checkForWaiters(&state)
-		p.handleCancelled(&state)
+		//p.handleCancelled(&state)
 		p.createMinActive(&state)
 		p.state.Store(state)
 
@@ -149,8 +151,43 @@ func (p *SuperPool) main(state State) {
 			}
 
 			p.pool = p.pool[:idx]
+
+		case get := <-p.cancelled:
+			state.Waiters--
+			get.removed <- true
+			get.callback <- errResource(ErrTimeout)
+			// TODO: Remove from queue here?
 		}
 	}
+}
+
+//func (p *SuperPool) cancelled() <-chan getCmd {
+//	c := make(chan getCmd)
+//	for _, get := range p.queue {
+//		go func() {
+//
+//		}()
+//	}
+//	return c
+//}
+
+func (p *SuperPool) handleCancelled(state *State) {
+	if len(p.queue) == 0 {
+		return
+	}
+
+	idx := 0
+	for _, get := range p.queue {
+		select {
+		case <-get.ctx.Done():
+			state.Waiters--
+			get.callback <- errResource(ErrTimeout)
+		default:
+			p.queue[idx] = get
+			idx++
+		}
+	}
+	p.queue = p.queue[:idx]
 }
 
 func (p *SuperPool) checkForWaiters(state *State) {
@@ -177,25 +214,6 @@ func (p *SuperPool) createMinActive(state *State) {
 	}
 }
 
-func (p *SuperPool) handleCancelled(state *State) {
-	if len(p.queue) == 0 {
-		return
-	}
-
-	idx := 0
-	for _, get := range p.queue {
-		select {
-		case <-get.ctx.Done():
-			state.Waiters--
-			get.callback <- errResource(ErrTimeout)
-		default:
-			p.queue[idx] = get
-			idx++
-		}
-	}
-	p.queue = p.queue[:idx]
-}
-
 type command interface {
 	execute(p *SuperPool, state *State)
 }
@@ -203,6 +221,7 @@ type command interface {
 type getCmd struct {
 	callback chan resourceWrapper
 	ctx      context.Context
+	removed  chan bool
 	when     time.Time
 }
 
@@ -216,7 +235,10 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 			state.WaitCount++
 			state.WaitTime += time.Now().Sub(cmd.when)
 		}
-		cmd.callback <- r
+		select {
+		case <-cmd.ctx.Done():
+		case cmd.callback <- r:
+		}
 		return
 	}
 
@@ -224,7 +246,13 @@ func (cmd getCmd) execute(p *SuperPool, state *State) {
 		state.Waiters++
 		cmd.when = time.Now()
 		p.queue = append(p.queue, cmd)
-		//p.cmd <- newWaiter{}
+		//go func() {
+		//	select {
+		//	case <-cmd.ctx.Done():
+		//		p.cancelled <- cmd
+		//	case <-cmd.removed:
+		//	}
+		//}()
 		return
 	}
 
@@ -545,15 +573,25 @@ func (p *SuperPool) Get(ctx context.Context) (Resource, error) {
 	}
 
 	callback := make(chan resourceWrapper, 1)
-	p.cmd <- getCmd{
-		callback: callback,
-		ctx:      ctx,
-	}
-	w := <-callback
-	if w.err != nil {
-		return nil, w.err
-	}
-	return w.resource, nil
+		p.cmd <- getCmd{
+			callback: callback,
+			ctx:      ctx,
+		}
+		select {
+			case w := <-callback
+
+			if w.err != nil {
+				return nil, w.err
+			}
+			return w.resource, nil
+			case ctx.Done():
+				go func() {
+					case w := <-callback {
+						p.put(w)
+					}
+				}()
+
+		}
 }
 
 func (p *SuperPool) Put(r Resource) {
